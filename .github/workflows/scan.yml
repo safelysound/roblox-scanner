@@ -170,9 +170,15 @@ jobs:
             echo "No DISCORD_WEBHOOK secret set - skipping (set in Settings > Secrets > Actions to enable)"
             exit 0
           fi
-          # Also restore from repo file if cache missed (first run after cache eviction)
-          if [ ! -f discord_message_id.txt ] && [ -f .github/discord_message_id.txt ]; then
-            cp .github/discord_message_id.txt discord_message_id.txt || true
+          # Prefer repo-persisted ID over cache (cache can be stale after webhook rotation)
+          if [ -f .github/discord_message_id.txt ]; then
+            echo "Restoring from repo .github/discord_message_id.txt (overrides stale cache if present)"
+            cp .github/discord_message_id.txt discord_message_id.txt
+            echo "Using ID $(cat discord_message_id.txt)"
+          elif [ -f discord_message_id.txt ]; then
+            echo "Using cached ID $(cat discord_message_id.txt)"
+          else
+            echo "No existing message ID — will create new message"
           fi
           echo "Discord updater - editing same embed every 5 min (color 3168504, Admin Tracker)"
           python discord_updater.py roblox_scan_results.json --webhook "$DISCORD_WEBHOOK" --message-id-file discord_message_id.txt 2>&1 | head -n 100
