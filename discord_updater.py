@@ -6,17 +6,19 @@ Discord webhook auto-editing updater for Roblox Group Scanner.
   Description:
     - <:roblox:1551329066337050754> [DisplayName (@Username)](https://www.roblox.com/users/ID/profile)
       - Playing: [Game Name](https://www.roblox.com/games/PLACEID/Game-Name)
-    - ... (target game first, then other games)
+    - ... (target game first, then Unknown)
     - Playing: **Unknown** - (Must Follow/Game Status Hidden) if hidden
     -# Last updated: <t:UNIX:R>
 
+- Filters: excludes anyone confirmed NOT playing Hunt (other games) — only Hunt + Unknown remain
+- Pagination: if description >4000 chars, splits into 2+ embeds (up to 10), each title Admin Tracker color 3168504. Auto-reverts to 1 embed when it fits.
 - First run: POST ?wait=true -> gets message_id, saves to discord_message_id.txt
-- Next runs: PATCH /messages/{id} to edit same embed (no spam)
+- Next runs: PATCH /messages/{id} to edit same message (no spam)
 
 Usage:
   python discord_updater.py roblox_scan_results.json --webhook https://discord.com/api/webhooks/... --message-id-file discord_message_id.txt
-  # or via env: DISCORD_WEBHOOK, DISCORD_MESSAGE_ID
 """
+
 import argparse
 import json
 import os
@@ -29,93 +31,185 @@ from pathlib import Path
 ROBLOX_EMOJI = "<:roblox:1551329066337050754>"
 DEFAULT_COLOR = 3168504  # 0x305778
 TARGET_GAME_URL = "https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20"
+TARGET_PLACE_ID = "74205509034203"
+MAX_DESC = 4000  # Discord description limit 4096, keep 4000 safe
 
 def slugify(name: str) -> str:
-    # Convert game name to URL slug: "Natural Disaster Survival" -> "Natural-Disaster-Survival"
     name = re.sub(r'[^a-zA-Z0-9]+', '-', name.strip())
     name = re.sub(r'-+', '-', name).strip('-')
     return name or "Game"
 
 def get_game_link(place_id, universe_id, last_location: str):
     """Return (display_name, url) for game. If hidden, return (None, None)."""
-    # If we have placeId, use it
     if place_id:
-        # Use lastLocation as name if available, else try to keep generic
         name = last_location.strip() if last_location and last_location.strip() else "Game"
-        # If lastLocation is empty but we have placeId, try to use name anyway
-        # For target game, keep exact name
         safe_name = slugify(name) if name != "Game" else "Game"
         url = f"https://www.roblox.com/games/{place_id}/{safe_name}"
-        # For known target, use exact URL user gave (better)
-        if str(place_id) == "74205509034203":
+        if str(place_id) == TARGET_PLACE_ID:
             url = TARGET_GAME_URL
             name = "The Hunt: Roblox 20"
         return name, url
     if universe_id:
-        # Fallback to universe link via place? Use universeId as place fallback
         name = last_location.strip() if last_location else "Game"
-        # Can't directly link universe, use games page with universe? Use place fallback
         url = f"https://www.roblox.com/games/{universe_id}/Game"
         return name, url
-    # Hidden
     return None, None
 
-def build_description(data: dict) -> str:
+def build_embeds(data: dict):
+    """Return list of embeds (1..10) with pagination and Hunt-only filter."""
     meta = data.get("meta", {})
     target = data.get("target_game_players", [])
     other = data.get("other_game_players", [])
-    # Combine prioritized: target first, then other
-    combined = target + other
 
-    lines = []
-    if not combined:
-        # No one in any game
-        lines.append("No admins currently in-game.")
-    else:
-        for u in combined:
-            display = u.get("displayName") or u.get("username") or "Unknown"
-            username = u.get("username") or "Unknown"
-            user_id = u.get("userId")
-            profile = f"https://www.roblox.com/users/{user_id}/profile" if user_id else "https://www.roblox.com/"
-            # Playing part
-            place_id = u.get("placeId")
-            root_place = u.get("rootPlaceId")
-            universe_id = u.get("universeId")
-            last_loc = u.get("lastLocation") or ""
-            # Prefer rootPlaceId if placeId null
-            effective_place = place_id or root_place
-            game_name, game_url = get_game_link(effective_place, universe_id, last_loc)
+    # Filter: exclude anyone confirmed NOT playing Hunt
+    # Keep: Hunt players (placeId == TARGET) + Unknown (no placeId/universeId)
+    filtered = []
+    for u in target + other:
+        pid = u.get("placeId") or u.get("rootPlaceId")
+        uid = u.get("universeId")
+        if pid is not None and str(pid) == TARGET_PLACE_ID:
+            filtered.append(u)
+        elif pid is None and uid is None:
+            # Unknown / hidden — keep (can't confirm not playing Hunt)
+            filtered.append(u)
+        else:
+            # Confirmed playing other game — exclude
+            continue
 
-            if game_name and game_url:
-                # Escape brackets in game name for markdown
-                safe_game = game_name.replace("[", "\\[").replace("]", "\\]")
-                playing = f"[{safe_game}]({game_url})"
-            else:
-                playing = "**Unknown** - (Must Follow/Game Status Hidden)"
-
-            # Exact format user requested:
-            # - <:roblox:ID> [DisplayName (@Username)](profile) \n - Playing: [Game](url)
-            line = f"- {ROBLOX_EMOJI} [{display} (@{username})]({profile})\n - Playing: {playing}"
-            lines.append(line)
-
-    # Last updated Discord timestamp: <t:UNIX:R> relative
     now = int(time.time())
-    lines.append(f"-# Last updated: <t:{now}:R>")
+    footer = f"-# Last updated: <t:{now}:R>"
 
-    desc = "\n".join(lines)
-    # Discord limit 4096 for description, truncate if needed
-    if len(desc) > 4000:
-        # Keep header + last updated + truncate middle
-        truncated = desc[:3900] + f"\n... and {len(combined) - 10} more\n-# Last updated: <t:{now}:R>"
-        desc = truncated
-    return desc
+    # If none after filter
+    if not filtered:
+        desc = f"No admins currently in-game.\n{footer}"
+        return [{"title": "Admin Tracker", "color": DEFAULT_COLOR, "description": desc}]
+
+    # Build per-player lines
+    lines = []
+    for u in filtered:
+        display = u.get("displayName") or u.get("username") or "Unknown"
+        username = u.get("username") or "Unknown"
+        user_id = u.get("userId")
+        profile = f"https://www.roblox.com/users/{user_id}/profile" if user_id else "https://www.roblox.com/"
+        place_id = u.get("placeId")
+        root_place = u.get("rootPlaceId")
+        universe_id = u.get("universeId")
+        last_loc = u.get("lastLocation") or ""
+        effective_place = place_id or root_place
+        game_name, game_url = get_game_link(effective_place, universe_id, last_loc)
+
+        if game_name and game_url:
+            safe_game = game_name.replace("[", "\\[").replace("]", "\\]")
+            playing = f"[{safe_game}]({game_url})"
+        else:
+            playing = "**Unknown** - (Must Follow/Game Status Hidden)"
+
+        line = f"- {ROBLOX_EMOJI} [{display} (@{username})]({profile})\n - Playing: {playing}"
+        lines.append(line)
+
+    # Pagination: respect both per-embed 4000 and Discord total 6000
+    TOTAL_LIMIT = 6000
+    # First, filter lines to fit within TOTAL_LIMIT (including footer)
+    # Keep as many players as possible from start, truncate rest with notice
+    filtered_lines = []
+    running_total = 0
+    truncated = 0
+    for line in lines:
+        ll = len(line) + 1  # newline
+        # Need to reserve footer for final total
+        # If this is first line, total would be line + footer
+        # For subsequent, total = sum(lines) + footers? Actually only last embed has footer
+        # So estimate future total = running_total + ll + len(footer) + 1
+        if running_total + ll + len(footer) + 1 > TOTAL_LIMIT:
+            truncated = len(lines) - len(filtered_lines)
+            break
+        # Also need to check that adding this line wouldn't already make per-embed handling impossible?
+        # Per-embed will be handled later, so just check total here
+        filtered_lines.append(line)
+        running_total += ll
+    # If we truncated, we will add notice later; running_total now is within limit
+    lines = filtered_lines
+
+    # If no lines fit (unlikely, since footer is 30 chars), just return footer
+    if not lines:
+        if truncated > 0:
+            desc = f"No admins currently in-game.\n{footer}\n-# +{truncated} more not shown (6000 limit)"
+        else:
+            desc = f"No admins currently in-game.\n{footer}"
+        return [{"title": "Admin Tracker", "color": DEFAULT_COLOR, "description": desc}]
+
+    # Now chunk remaining lines by per-embed MAX_DESC
+    chunks = []
+    cur = []
+    cur_len = 0
+    for line in lines:
+        ll = len(line) + 1
+        if cur and cur_len + ll > MAX_DESC:
+            chunks.append(cur)
+            cur = []
+            cur_len = 0
+        cur.append(line)
+        cur_len += ll
+    if cur:
+        chunks.append(cur)
+
+    # Build embeds, adding footer to last chunk
+    embeds = []
+    for i, chunk in enumerate(chunks):
+        is_last = (i == len(chunks) - 1)
+        desc = "\n".join(chunk)
+        if is_last:
+            # Need footer to fit in per-embed
+            if len(desc) + 1 + len(footer) > MAX_DESC:
+                # Split last chunk further
+                while chunk and len("\n".join(chunk)) + 1 + len(footer) > MAX_DESC:
+                    last_line = chunk.pop()
+                    if chunk:
+                        embeds.append({"title": "Admin Tracker", "color": DEFAULT_COLOR, "description": "\n".join(chunk)})
+                        chunk = [last_line]
+                    else:
+                        # Single line too long — truncate
+                        chunk = [last_line[:MAX_DESC - len(footer) - 10] + "..."]
+                        break
+                desc = "\n".join(chunk) + f"\n{footer}"
+                # If we split, we already pushed previous chunk, now push last
+                embeds.append({"title": "Admin Tracker", "color": DEFAULT_COLOR, "description": desc})
+                continue
+            else:
+                desc = f"{desc}\n{footer}" if desc else footer
+        embeds.append({"title": "Admin Tracker", "color": DEFAULT_COLOR, "description": desc})
+
+    # Add truncation notice to last embed if we filtered lines
+    if truncated > 0:
+        notice = f"\n-# +{truncated} more not shown (6000 char total limit)"
+        last = embeds[-1]
+        # Ensure notice fits per-embed and total
+        if len(last["description"]) + len(notice) > MAX_DESC:
+            # Make room by trimming last chunk's core
+            last["description"] = last["description"][:MAX_DESC - len(notice) - 1] + notice
+        elif sum(len(e["description"]) for e in embeds) + len(notice) > TOTAL_LIMIT:
+            # Trim to fit total
+            last["description"] = last["description"][:TOTAL_LIMIT - sum(len(e["description"]) for e in embeds[:-1]) - len(notice) - 1] + notice
+        else:
+            last["description"] += notice
+
+    # Safety: Discord max 10 embeds
+    if len(embeds) > 10:
+        embeds = embeds[:10]
+        last = embeds[-1]
+        notice = f"\n... and more not shown (limit 10 embeds)"
+        if len(last["description"]) + len(notice) > MAX_DESC:
+            last["description"] = last["description"][:MAX_DESC - len(notice) - 1] + notice
+        else:
+            last["description"] += notice
+
+    return embeds
 
 def load_message_id(path: str) -> str:
     p = Path(path)
     if p.exists():
         try:
             txt = p.read_text(encoding="utf-8").strip()
-            # File may contain just id or json
             if txt.isdigit():
                 return txt
             try:
@@ -126,7 +220,6 @@ def load_message_id(path: str) -> str:
                     return j
             except:
                 pass
-            # Take first line that looks like id
             for line in txt.split():
                 if line.strip().isdigit():
                     return line.strip()
@@ -139,7 +232,7 @@ def save_message_id(path: str, msg_id: str):
     Path(path).write_text(str(msg_id).strip(), encoding="utf-8")
     print(f"Saved message ID {msg_id} to {path}")
 
-def send_or_edit(webhook_url: str, embed: dict, message_id_file: str):
+def send_or_edit(webhook_url: str, embeds: list, message_id_file: str):
     webhook_url = webhook_url.strip()
     if not webhook_url:
         webhook_url = os.environ.get("DISCORD_WEBHOOK", "") or os.environ.get("DISCORD_WEBHOOK_URL", "")
@@ -147,34 +240,26 @@ def send_or_edit(webhook_url: str, embed: dict, message_id_file: str):
         print("No webhook URL provided (arg --webhook or env DISCORD_WEBHOOK)", file=sys.stderr)
         sys.exit(1)
 
-    # Ensure webhook has ?wait=true for POST to get id
-    # Use webhook's existing name/avatar (don't override with username/avatar_url)
-    payload = {"embeds": [embed]}
+    # Keep webhook's existing name/avatar (don't override)
+    payload = {"embeds": embeds}
 
     existing_id = load_message_id(message_id_file) if message_id_file else ""
     if existing_id:
         print(f"Found existing message ID {existing_id}, trying to edit...")
-        # Try PATCH
-        # Webhook edit URL: {webhook}/messages/{message_id}
-        # Need to handle webhook URL that may already have ?wait=true or other query
         base = webhook_url.split("?")[0]
         edit_url = f"{base}/messages/{existing_id}"
-        # Preserve query? For edit, don't need ?wait
         try:
             r = requests.patch(edit_url, json=payload, timeout=15)
             print(f"PATCH {edit_url} -> {r.status_code}")
             if r.status_code in (200, 204):
                 print("Edited existing message successfully.")
-                # Update timestamp file if needed (id unchanged)
                 return existing_id
             else:
                 print(f"Edit failed ({r.status_code}): {r.text[:500]}")
                 if r.status_code == 404:
                     print("Message not found (404), will create new one...")
-                    existing_id = ""  # fallback to POST
+                    existing_id = ""
                 else:
-                    # For other errors, still try to show but not fallback?
-                    # e.g., 429 ratelimit -> wait and retry once
                     if r.status_code == 429:
                         try:
                             j = r.json()
@@ -187,7 +272,6 @@ def send_or_edit(webhook_url: str, embed: dict, message_id_file: str):
                                 return existing_id
                         except:
                             pass
-                    # Don't exit, try POST as fallback only on 404
                     if r.status_code != 404:
                         print("Edit failed, exiting without creating duplicate.")
                         sys.exit(1)
@@ -197,7 +281,6 @@ def send_or_edit(webhook_url: str, embed: dict, message_id_file: str):
 
     if not existing_id:
         print("Creating new webhook message...")
-        # POST with ?wait=true to get message id back
         separator = "&" if "?" in webhook_url else "?"
         post_url = f"{webhook_url}{separator}wait=true"
         try:
@@ -213,7 +296,7 @@ def send_or_edit(webhook_url: str, embed: dict, message_id_file: str):
                             save_message_id(message_id_file, msg_id)
                         return msg_id
                     else:
-                        print("POST succeeded but no ID in response (maybe webhook without wait?).")
+                        print("POST succeeded but no ID in response.")
                         print(r.text[:1000])
                         return ""
                 except:
@@ -221,42 +304,43 @@ def send_or_edit(webhook_url: str, embed: dict, message_id_file: str):
                     return ""
             else:
                 print(f"POST failed {r.status_code}: {r.text[:1000]}")
-                if r.status_code == 429:
-                    print("Rate limited on POST")
                 sys.exit(1)
         except Exception as e:
             print(f"POST exception: {e}", file=sys.stderr)
             sys.exit(1)
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Discord webhook updater - edit same embed every 5 min")
-    ap.add_argument("json_file", nargs="?", default="roblox_scan_results.json", help="Merged scan JSON")
+    ap = argparse.ArgumentParser(description="Discord webhook updater - edit same message every 5 min")
+    ap.add_argument("json_file", nargs="?")
     ap.add_argument("--webhook", type=str, default="", help="Discord webhook URL (or env DISCORD_WEBHOOK)")
     ap.add_argument("--message-id-file", type=str, default="discord_message_id.txt", help="File to store message ID")
-    ap.add_argument("--dry-run", action="store_true", help="Just print embed, don't send")
+    ap.add_argument("--dry-run", action="store_true", help="Just print embeds, don't send")
     args = ap.parse_args()
 
-    data_path = Path(args.json_file)
+    # Default json_file: try common locations
+    data_path = None
+    if args.json_file:
+        data_path = Path(args.json_file)
+    else:
+        for cand in ["roblox_scan_results.json", "shards/roblox_scan_results.json", "discord_test.json"]:
+            if Path(cand).exists():
+                data_path = Path(cand)
+                break
+        if not data_path:
+            data_path = Path("roblox_scan_results.json")
+
     if not data_path.exists():
-        print(f"JSON not found: {args.json_file}", file=sys.stderr)
+        print(f"JSON not found: {data_path}", file=sys.stderr)
         sys.exit(1)
     data = json.loads(data_path.read_text(encoding="utf-8"))
 
-    # Also handle case where json is sharded and we need to merge? If user passes shard_0.json, we still handle
-    # Build embed
-    desc = build_description(data)
-    embed = {
-        "title": "Admin Tracker",
-        "color": DEFAULT_COLOR,
-        "description": desc
-    }
+    embeds = build_embeds(data)
 
     if args.dry_run:
-        print(json.dumps({"embeds": [embed]}, indent=2))
+        print(json.dumps({"embeds": embeds}, indent=2))
+        print(f"\n# Embeds: {len(embeds)}, total chars: {sum(len(e['description']) for e in embeds)}", file=sys.stderr)
         sys.exit(0)
 
     webhook = args.webhook or os.environ.get("DISCORD_WEBHOOK", "")
     msg_id_file = args.message_id_file
-
-    # If webhook is empty, try to load from file? No, need webhook
-    send_or_edit(webhook, embed, msg_id_file)
+    send_or_edit(webhook, embeds, msg_id_file)
