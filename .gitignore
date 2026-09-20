@@ -1,0 +1,11 @@
+# Secrets - never commit
+cookies.txt
+cookies.json
+.env
+roblox_scan_results.json
+roblox_scan_results.csv
+shard_*.json
+# Python
+__pycache__/
+*.pyc
+.venv/

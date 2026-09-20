@@ -1,0 +1,168 @@
+name: Roblox Group Scan
+
+# Public repo - free minutes are unlimited for public, 2000/min for private
+# Secrets: add DISCORD_WEBHOOK in Settings > Secrets and variables > Actions if you want Discord later
+on:
+  workflow_dispatch:
+    inputs:
+      max_members:
+        description: 'Limit members for testing (leave empty for all 2771)'
+        required: false
+        default: ''
+      place_id:
+        description: 'Target PlaceId'
+        required: false
+        default: '74205509034203'
+      group_id:
+        description: 'Group ID'
+        required: false
+        default: '1200769'
+  # Optional: schedule every hour (uncomment)
+  # schedule:
+  #   - cron: '0 * * * *'  # hourly
+  # Optional: push trigger for testing
+  # push:
+  #   branches: [main]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install deps
+        run: |
+          pip install requests tqdm
+          # Optional: for better logs
+          python --version
+
+      - name: Run shard ${{ matrix.shard }}/3
+        env:
+          # Add secrets here if you use them in future - they are redacted in logs
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          echo "Running shard ${{ matrix.shard }} of 3"
+          python roblox_group_scanner.py \
+            --group-id "${{ inputs.group_id || '1200769' }}" \
+            --place-id "${{ inputs.place_id || '74205509034203' }}" \
+            --shard ${{ matrix.shard }} --shards 3 \
+            ${{ inputs.max_members != '' && format('--max-members {0}', inputs.max_members) || '' }} \
+            --json shard_${{ matrix.shard }}.json \
+            --verbose
+
+      - name: Upload shard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: shard_${{ matrix.shard }}.json
+          retention-days: 7
+          if-no-files-found: error
+
+  merge:
+    needs: scan
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Download all shards
+        uses: actions/download-artifact@v4
+        with:
+          path: shards
+          pattern: shard-*
+          merge-multiple: true
+
+      - name: Merge shards
+        id: merge
+        run: |
+          ls -lh shards/
+          cat shards/*.json | head -c 2000
+          python merge_shards.py shards/*.json --json roblox_scan_results.json --csv roblox_scan_results.csv || python3 merge_shards.py shards/*.json --json roblox_scan_results.json
+          ls -lh roblox_scan_results.*
+          cat roblox_scan_results.json | python3 -m json.tool | head -n 150
+
+      - name: Upload final results
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-results
+          path: |
+            roblox_scan_results.json
+            roblox_scan_results.csv
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Summary
+        run: |
+          echo "## Scan Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          python3 -c "
+          import json
+          d=json.load(open('roblox_scan_results.json'))
+          print(f\"**Group:** {d['meta']['groupId']} | **Target:** {d['meta']['targetGameName']} ({d['meta']['targetPlaceId']})\")
+          print(f\"**Total members:** {d['summary']['total_members']}\")
+          print(f\"**Target game:** {d['summary']['target_game_count']}\")
+          print(f\"**Other games:** {d['summary']['other_game_count']}\")
+          " >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download artifacts for full JSON/CSV." >> $GITHUB_STEP_SUMMARY
+          cat roblox_scan_results.json | python3 -m json.tool | head -n 100 >> $GITHUB_STEP_SUMMARY || true
+
+      # --- Discord webhook (future) - uncomment when ready ---
+      # Uses secret DISCORD_WEBHOOK if set, otherwise skips gracefully
+      - name: Discord webhook
+        if: always()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK" ]; then
+            echo "No DISCORD_WEBHOOK secret set - skipping"
+            exit 0
+          fi
+          echo "Sending to Discord..."
+          python -c "
+          import json, os, requests
+          d=json.load(open('roblox_scan_results.json'))
+          meta=d['meta']
+          target=d['target_game_players']
+          other=d['other_game_players']
+          webhook=os.environ['DISCORD_WEBHOOK']
+          # Reuse same logic as scanner's webhook for combined results
+          desc=f\"**Target:** [{meta['targetGameName'] or meta['targetPlaceId']}]({meta['targetGameUrl']})\\n\"
+          desc+=f\"**Playing TARGET:** {len(target)} | **Other:** {len(other)} | **Total:** {d['summary']['total_members']}\\n\"
+          if target:
+              desc+='\n**🎯 TARGET:**\n'
+              for u in target[:10]:
+                  desc+=f\"• [{u['username']}](https://www.roblox.com/users/{u['userId']}/profile) — {u['role']}\n\"
+              if len(target)>10:
+                  desc+=f'_+{len(target)-10} more_\n'
+          if other:
+              desc+='\n**🎮 Other:**\n'
+              for u in other[:10]:
+                  loc=u['lastLocation'] or f\"Place {u['placeId'] or 'unknown'}\"
+                  desc+=f\"• {u['username']} — {loc}\n\"
+          if not target and not other:
+              desc+='\n_No one in game._'
+          payload={'embeds':[{'title':f\"Roblox Scan — {d['summary']['total_members']} members\",'description':desc[:4000],'color':0x00ff00 if target else 0x808080,'url':meta['targetGameUrl']}],'username':'Roblox Scanner'}
+          r=requests.post(webhook, json=payload, timeout=10)
+          print(f'Discord {r.status_code}: {r.text[:500]}')
+          "
