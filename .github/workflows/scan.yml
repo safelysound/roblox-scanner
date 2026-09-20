@@ -39,7 +39,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: Install deps
         run: |
@@ -49,17 +48,23 @@ jobs:
 
       - name: Run shard ${{ matrix.shard }}/3
         env:
-          # Add secrets here if you use them in future - they are redacted in logs
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           echo "Running shard ${{ matrix.shard }} of 3"
+          MAX_ARGS=""
+          if [ -n "${{ inputs.max_members }}" ]; then
+            MAX_ARGS="--max-members ${{ inputs.max_members }}"
+          fi
           python roblox_group_scanner.py \
             --group-id "${{ inputs.group_id || '1200769' }}" \
             --place-id "${{ inputs.place_id || '74205509034203' }}" \
             --shard ${{ matrix.shard }} --shards 3 \
-            ${{ inputs.max_members != '' && format('--max-members {0}', inputs.max_members) || '' }} \
+            $MAX_ARGS \
             --json shard_${{ matrix.shard }}.json \
             --verbose
+          echo "Shard ${{ matrix.shard }} produced:"
+          ls -lh shard_${{ matrix.shard }}.json
+          cat shard_${{ matrix.shard }}.json | head -c 1000
 
       - name: Upload shard artifact
         uses: actions/upload-artifact@v4
@@ -88,18 +93,34 @@ jobs:
       - name: Download all shards
         uses: actions/download-artifact@v4
         with:
-          path: shards
           pattern: shard-*
           merge-multiple: true
+          path: shards
+
+      - name: Debug shards
+        run: |
+          echo "=== Current dir ==="
+          ls -R | head -n 100
+          echo "=== Shards dir ==="
+          ls -lh shards/ || echo "shards/ not found"
+          find . -name "shard_*.json" | head -n 20
+          find shards -type f 2>&1 | head -n 20
 
       - name: Merge shards
         id: merge
         run: |
-          ls -lh shards/
-          cat shards/*.json | head -c 2000
-          python merge_shards.py shards/*.json --json roblox_scan_results.json --csv roblox_scan_results.csv || python3 merge_shards.py shards/*.json --json roblox_scan_results.json
+          # Find shards wherever they landed (handles both shards/*.json and shards/shard-*/shard_*.json)
+          SHARDS=$(find shards . -name "shard_*.json" 2>/dev/null | head -n 10)
+          echo "Found shards: $SHARDS"
+          if [ -z "$SHARDS" ]; then
+            echo "ERROR: No shard files found!"
+            find . -type f -name "*.json" | head -n 20
+            exit 1
+          fi
+          # Use python (not python3) for consistency with runner
+          python merge_shards.py $SHARDS --json roblox_scan_results.json --csv roblox_scan_results.csv
           ls -lh roblox_scan_results.*
-          cat roblox_scan_results.json | python3 -m json.tool | head -n 150
+          python -m json.tool roblox_scan_results.json | head -n 150
 
       - name: Upload final results
         uses: actions/upload-artifact@v4
@@ -115,7 +136,7 @@ jobs:
         run: |
           echo "## Scan Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          python3 -c "
+          python -c "
           import json
           d=json.load(open('roblox_scan_results.json'))
           print(f\"**Group:** {d['meta']['groupId']} | **Target:** {d['meta']['targetGameName']} ({d['meta']['targetPlaceId']})\")
@@ -125,7 +146,7 @@ jobs:
           " >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Download artifacts for full JSON/CSV." >> $GITHUB_STEP_SUMMARY
-          cat roblox_scan_results.json | python3 -m json.tool | head -n 100 >> $GITHUB_STEP_SUMMARY || true
+          cat roblox_scan_results.json | python -m json.tool | head -n 100 >> $GITHUB_STEP_SUMMARY || true
 
       # --- Discord webhook (future) - uncomment when ready ---
       # Uses secret DISCORD_WEBHOOK if set, otherwise skips gracefully
