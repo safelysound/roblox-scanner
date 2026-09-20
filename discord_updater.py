@@ -104,7 +104,7 @@ def build_embeds(data: dict):
         else:
             playing = "**Unknown** - (Must Follow/Game Status Hidden)"
 
-        line = f"- {ROBLOX_EMOJI} [{display} (@{username})]({profile})\n - Playing: {playing}"
+        line = f"- {ROBLOX_EMOJI} [{display} (@{username})]({profile})\n  - Playing: {playing}"
         lines.append(line)
 
     # Pagination: respect both per-embed 4000 and Discord total 6000
