@@ -18,7 +18,7 @@ on:
         description: 'Group ID'
         required: false
         default: '1200769'
-  schedule:
+  schedule: # forced re-register 2026-09-20T22:41:14Z
     - cron: '*/5 * * * *'  # Every 5 minutes - auto-updates Discord embed by editing same message
   # push:
   #   branches: [main]
