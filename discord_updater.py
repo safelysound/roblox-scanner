@@ -148,7 +148,8 @@ def send_or_edit(webhook_url: str, embed: dict, message_id_file: str):
         sys.exit(1)
 
     # Ensure webhook has ?wait=true for POST to get id
-    payload = {"embeds": [embed], "username": "Admin Tracker", "avatar_url": "https://www.roblox.com/favicon.ico"}
+    # Use webhook's existing name/avatar (don't override with username/avatar_url)
+    payload = {"embeds": [embed]}
 
     existing_id = load_message_id(message_id_file) if message_id_file else ""
     if existing_id:
