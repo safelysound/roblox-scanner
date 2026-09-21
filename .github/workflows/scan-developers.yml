@@ -1,0 +1,183 @@
+name: Developer Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_members:
+        description: 'Limit for testing (leave empty for all 6)'
+        required: false
+        default: ''
+      place_id:
+        description: 'Target PlaceId'
+        required: false
+        default: '74205509034203'
+  schedule:
+    - cron: '*/5 * * * *'
+
+concurrency:
+  group: developer-scan
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Run shard ${{ matrix.shard }}/3 (Developers)
+        run: |
+          echo "Running Developer shard ${{ matrix.shard }} of 3"
+          cat config/developer_ids.txt
+          echo "---"
+          python developer_scanner.py \
+            --user-ids-file config/developer_ids.txt \
+            --place-id "${{ inputs.place_id || '74205509034203' }}" \
+            --shard ${{ matrix.shard }} --shards 3 \
+            --json shard_${{ matrix.shard }}.json \
+            --verbose
+          ls -lh shard_${{ matrix.shard }}.json
+          cat shard_${{ matrix.shard }}.json | python -m json.tool | head -n 80
+
+      - name: Upload shard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-developer-${{ matrix.shard }}
+          path: shard_${{ matrix.shard }}.json
+          retention-days: 7
+          if-no-files-found: error
+
+  merge:
+    needs: scan
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Download all shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-developer-*
+          merge-multiple: true
+          path: shards
+
+      - name: Debug shards
+        run: |
+          ls -R | head -n 100
+          ls -lh shards/ || echo "shards/ not found"
+          find . -name "shard_*.json" | head -n 20
+
+      - name: Merge shards
+        run: |
+          SHARDS=$(find shards . -name "shard_*.json" 2>/dev/null | tr '\n' ' ')
+          echo "Found shards: $SHARDS"
+          if [ -z "$SHARDS" ]; then
+            echo "ERROR: No shard files found!"
+            find . -type f -name "*.json" | head -n 20
+            exit 1
+          fi
+          python merge_shards.py $SHARDS --json roblox_scan_results_developers.json --csv roblox_scan_results_developers.csv
+          ls -lh roblox_scan_results_developers.*
+          python -m json.tool roblox_scan_results_developers.json | head -n 150
+
+      - name: Upload final results
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-results-developers
+          path: |
+            roblox_scan_results_developers.json
+            roblox_scan_results_developers.csv
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Summary
+        run: |
+          echo "## Developer Scan Complete" >> $GITHUB_STEP_SUMMARY
+          python -c "
+          import json
+          d=json.load(open('roblox_scan_results_developers.json'))
+          print(f\"**Developers tracked:** {d['summary']['total_members']}\")
+          print(f\"**Target game:** {d['summary']['target_game_count']}\")
+          print(f\"**Other games:** {d['summary']['other_game_count']}\")
+          " >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Edit \`config/developer_ids.txt\` in repo to add/remove IDs — next 5-min run picks it up automatically (no manual re-run needed)." >> $GITHUB_STEP_SUMMARY
+
+      - name: Restore Discord message ID
+        uses: actions/cache@v4
+        with:
+          path: discord_message_id_developers.txt
+          key: discord-message-id-developers
+          restore-keys: |
+            discord-message-id-developers
+
+      - name: Discord webhook (Developer Tracker)
+        if: always()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_DEVELOPERS }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK" ]; then
+            echo "No DISCORD_WEBHOOK_DEVELOPERS secret set - skipping"
+            exit 0
+          fi
+          if [ -f .github/discord_message_id_developers.txt ]; then
+            echo "Restoring from repo .github/discord_message_id_developers.txt"
+            cp .github/discord_message_id_developers.txt discord_message_id_developers.txt
+            echo "Using ID $(cat discord_message_id_developers.txt)"
+          elif [ -f discord_message_id_developers.txt ]; then
+            echo "Using cached ID $(cat discord_message_id_developers.txt)"
+          else
+            echo "No existing message ID — will create new message"
+          fi
+          echo "Developer Tracker - editing same embed every 5 min (#000000)"
+          python discord_updater.py roblox_scan_results_developers.json --webhook "$DISCORD_WEBHOOK" --message-id-file discord_message_id_developers.txt --title "Developer Tracker" --color "#000000" --emoji "<:developer:1551388816324169838>" 2>&1 | head -n 100
+          echo "--- Embed preview ---"
+          python discord_updater.py roblox_scan_results_developers.json --title "Developer Tracker" --color "#000000" --emoji "<:developer:1551388816324169838>" --dry-run | head -n 80
+
+      - name: Save Discord message ID to cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: discord_message_id_developers.txt
+          key: discord-message-id-developers-${{ hashFiles('discord_message_id_developers.txt') }}
+        continue-on-error: true
+
+      - name: Persist Discord message ID to repo
+        if: always()
+        run: |
+          if [ -f discord_message_id_developers.txt ]; then
+            mkdir -p .github
+            cp discord_message_id_developers.txt .github/discord_message_id_developers.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add .github/discord_message_id_developers.txt || true
+            git diff --staged --quiet || git commit -m "chore: update developers message id [skip ci]" || true
+            git push origin HEAD:main || echo "Push failed - cache will handle it"
+          fi
+        continue-on-error: true
