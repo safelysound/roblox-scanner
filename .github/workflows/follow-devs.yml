@@ -1,4 +1,4 @@
-name: Follow Devs (one-time)
+name: "Follow Devs (one-time)"
 
 on:
   workflow_dispatch:
@@ -40,15 +40,15 @@ jobs:
           echo "---"
           if [ "$DRY_RUN" = "true" ]; then
             echo "Dry run - just checking cookie & IDs, not following"
-            python -c "
-import os
-for k in ['ROBLOSECURITY','ROBLOX_COOKIE','ROBLOSECURITY_1']:
-    v=os.environ.get(k,'')
-    print(f\"{k}: {'set ('+str(len(v))+')' if v else 'empty'}\")
-import pathlib
-ids=[l.strip() for l in open('config/developer_ids.txt') if l.strip() and not l.strip().startswith('#')]
-print(f\"IDs: {len(ids)}\")
-"
+            python3 << 'PY'
+            import os
+            for k in ['ROBLOSECURITY','ROBLOX_COOKIE','ROBLOSECURITY_1']:
+                v=os.environ.get(k,'')
+                print(f"{k}: {'set ('+str(len(v))+')' if v else 'empty'}")
+            import pathlib
+            ids=[l.strip() for l in open('config/developer_ids.txt') if l.strip() and not l.strip().startswith('#')]
+            print(f"IDs: {len(ids)}")
+            PY
           else
             python follow_all.py
           fi
