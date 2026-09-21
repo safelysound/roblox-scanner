@@ -54,6 +54,9 @@ jobs:
 
       - name: Run shard ${{ matrix.shard }}/3
         env:
+          ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
+          ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
+          ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           echo "Running shard ${{ matrix.shard }} of 3"

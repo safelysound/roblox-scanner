@@ -47,6 +47,10 @@ jobs:
           python --version
 
       - name: Run shard ${{ matrix.shard }}/3
+        env:
+          ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
+          ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
+          ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
         run: |
           echo "Running Video Star shard ${{ matrix.shard }} of 3 (Group 4199740)"
           MAX_ARGS=""

@@ -28,6 +28,36 @@ PRESENCE_BATCH_SIZE = 50
 DEFAULT_PLACE_ID = 74205509034203
 DEFAULT_UNIVERSE_ID = 10766456501
 
+# ================= Cookie support (fixes Offline-but-Follow-shows-Hunt) =================
+# Reads alt cookie that Follows the 102 devs. Presence then returns InGame instead of Offline.
+# Supports: ROBLOSECURITY, ROBLOX_COOKIE, ROBLOSECURITY_1 (all read, first found used)
+def _get_roblox_cookie() -> str:
+    for key in ["ROBLOSECURITY", "ROBLOX_COOKIE", "ROBLOSECURITY_1", "ROBLOSECURITY_2", "ROBLOSECURITY_3", "ROBLOSECURITY_4", "ROBLOSECURITY_5", "ROBLOSECURITY_6", "ROBLOSECURITY1", "ROBLOSECURITY2"]:
+        val = os.environ.get(key, "")
+        if val and val.strip():
+            v = val.strip().strip('"').strip("'")
+            if v.startswith(".ROBLOSECURITY="):
+                v = v.split("=", 1)[1]
+            if v:
+                return v
+    return ""
+
+def _cookie_headers() -> Dict[str, str]:
+    base = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
+    ck = _get_roblox_cookie()
+    if ck:
+        base["Cookie"] = f".ROBLOSECURITY={ck}"
+    return base
+
+def _log_cookie_status():
+    ck = _get_roblox_cookie()
+    if ck:
+        print(f"Using ROBLOSECURITY cookie (len {len(ck)}, prefix {ck[:20]}...) — authenticated presence (Follow bypass)", file=sys.stderr)
+        return True
+    else:
+        print("No ROBLOSECURITY/ROBLOX_COOKIE found — unauthenticated presence (Offline-hidden devs will stay Offline)", file=sys.stderr)
+        return False
+
 def resolve_universe_id(place_id: int) -> Optional[int]:
     try:
         r = requests.get(UNIVERSE_API.format(place_id=place_id), timeout=10, headers={"User-Agent": "Mozilla/5.0"})
@@ -86,12 +116,21 @@ def fetch_user_info(user_id: int) -> Dict[str, Any]:
     return {"userId": user_id, "username": f"user{user_id}", "displayName": f"user{user_id}", "hasVerifiedBadge": False}
 
 def fetch_presences(user_ids: List[int]) -> Dict[int, Dict[str, Any]]:
-    # Batch 50
+    # Batch 50 — authenticated if ROBLOSECURITY present (Follow bypass for Offline→Hunt)
+    headers = _cookie_headers()
+    if not hasattr(fetch_presences, "_logged"):
+        _log_cookie_status()
+        fetch_presences._logged = True
     results={}
     for i in range(0, len(user_ids), PRESENCE_BATCH_SIZE):
         batch=user_ids[i:i+PRESENCE_BATCH_SIZE]
         try:
-            r=requests.post(PRESENCE_API, json={"userIds": batch}, timeout=15, headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"})
+            r=requests.post(PRESENCE_API, json={"userIds": batch}, timeout=15, headers=headers)
+            # If 403 due to bad cookie/CSRF, retry unauthenticated as fallback
+            if r.status_code==403 and "Cookie" in headers:
+                print(f"Presence 403 with cookie — retrying unauthenticated (cookie may be invalid/expired)", file=sys.stderr)
+                headers_no_cookie = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
+                r=requests.post(PRESENCE_API, json={"userIds": batch}, timeout=15, headers=headers_no_cookie)
             if r.status_code==200:
                 for p in r.json().get("userPresences",[]):
                     results[p["userId"]]=p

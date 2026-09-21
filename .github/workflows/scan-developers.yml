@@ -41,6 +41,10 @@ jobs:
         run: pip install requests
 
       - name: Run shard ${{ matrix.shard }}/3 (Developers)
+        env:
+          ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
+          ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
+          ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
         run: |
           echo "Running Developer shard ${{ matrix.shard }} of 3"
           cat config/developer_ids.txt

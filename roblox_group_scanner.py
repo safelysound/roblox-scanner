@@ -230,8 +230,8 @@ def load_cookies(args) -> List[str]:
         if n:
             cookies.append(n)
 
-    # 2. Env vars: ROBLOSECURITY, ROBLOSECURITY_1..6
-    for env_key in ["ROBLOSECURITY", "ROBLOSECURITY_1", "ROBLOSECURITY_2", "ROBLOSECURITY_3", "ROBLOSECURITY_4", "ROBLOSECURITY_5", "ROBLOSECURITY_6"]:
+    # 2. Env vars: ROBLOSECURITY, ROBLOX_COOKIE, ROBLOSECURITY_1..6
+    for env_key in ["ROBLOSECURITY", "ROBLOX_COOKIE", "ROBLOSECURITY_1", "ROBLOSECURITY_2", "ROBLOSECURITY_3", "ROBLOSECURITY_4", "ROBLOSECURITY_5", "ROBLOSECURITY_6", "ROBLOSECURITY1", "ROBLOSECURITY2"]:
         val = os.environ.get(env_key)
         if val:
             n = _normalize_cookie(val)
