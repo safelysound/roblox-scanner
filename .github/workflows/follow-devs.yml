@@ -1,0 +1,57 @@
+name: Follow Devs (one-time)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (check without following)'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+permissions:
+  contents: read
+
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Follow all developer_ids.txt (102) with alt
+        env:
+          ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
+          ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
+          ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          echo "Following $(grep -c '^[0-9]' config/developer_ids.txt) IDs..."
+          cat config/developer_ids.txt | head -n 20
+          echo "---"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run - just checking cookie & IDs, not following"
+            python -c "
+import os
+for k in ['ROBLOSECURITY','ROBLOX_COOKIE','ROBLOSECURITY_1']:
+    v=os.environ.get(k,'')
+    print(f\"{k}: {'set ('+str(len(v))+')' if v else 'empty'}\")
+import pathlib
+ids=[l.strip() for l in open('config/developer_ids.txt') if l.strip() and not l.strip().startswith('#')]
+print(f\"IDs: {len(ids)}\")
+"
+          else
+            python follow_all.py
+          fi
+
+      - name: Done
+        run: echo "Check logs above - 'Follow X -> OK' or 'already following'. Next 5-min tracker tick will show Hunt for those 2."
