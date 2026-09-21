@@ -28,30 +28,31 @@ jobs:
       - name: Install deps
         run: pip install requests
 
-      - name: Follow all developer_ids.txt (102) with alt
+      - name: Dry run check
+        if: ${{ inputs.dry_run == 'true' }}
         env:
           ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
           ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
           ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
-          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          echo "Dry run - checking cookie & IDs, not following"
+          echo "IDs in file: $(grep -c '^[0-9]' config/developer_ids.txt)"
+          cat config/developer_ids.txt | head -n 20
+          python3 -c "import os; [print(f\"{k}: {'set ('+str(len(os.environ.get(k,'')))+')' if os.environ.get(k,'') else 'empty'}\") for k in ['ROBLOSECURITY','ROBLOX_COOKIE','ROBLOSECURITY_1']]"
+          python3 -c "ids=[l.strip() for l in open('config/developer_ids.txt') if l.strip() and not l.strip().startswith('#')]; print(f\"IDs: {len(ids)}\")"
+
+      - name: Follow all developer_ids.txt (102) with alt
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
+          ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
+          ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
         run: |
           echo "Following $(grep -c '^[0-9]' config/developer_ids.txt) IDs..."
           cat config/developer_ids.txt | head -n 20
           echo "---"
-          if [ "$DRY_RUN" = "true" ]; then
-            echo "Dry run - just checking cookie & IDs, not following"
-            python3 << 'PY'
-            import os
-            for k in ['ROBLOSECURITY','ROBLOX_COOKIE','ROBLOSECURITY_1']:
-                v=os.environ.get(k,'')
-                print(f"{k}: {'set ('+str(len(v))+')' if v else 'empty'}")
-            import pathlib
-            ids=[l.strip() for l in open('config/developer_ids.txt') if l.strip() and not l.strip().startswith('#')]
-            print(f"IDs: {len(ids)}")
-            PY
-          else
-            python follow_all.py
-          fi
+          python follow_all.py
 
       - name: Done
+        if: always()
         run: echo "Check logs above - 'Follow X -> OK' or 'already following'. Next 5-min tracker tick will show Hunt for those 2."
