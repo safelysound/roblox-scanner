@@ -1,0 +1,16 @@
+-- YAGPDB Custom Command #2 --
+-- Trigger Type: Interaction -> Modal Submission
+-- Trigger / Custom ID: suggest_developer_modal  (must match modal custom_id from CC#1)
+-- Posts to https://canary.discord.com/channels/1551328688547569754/1551394065491431494
+-- Format: **New Developer Suggested**: <answer>  +  <@475392041174564886>
+-- Paste this code, Save --
+
+{{ $answer := index .Values 0 }}
+{{ $channel := 1551394065491431494 }}
+{{ $mention := "<@475392041174564886>" }}
+{{ $content := printf "**New Developer Suggested**: %s\n%s" $answer $mention }}
+{{ sendMessageNoEscape $channel $content }}
+{{ sendResponseNoEscape nil (sdict "content" "✅ Suggestion submitted — thanks!" "flags" 64) }}
+
+-- If you used modalBuilder (newer) in CC#1 instead of cmodal, use this instead for the first line:
+-- {{ $answer := (index .ModalValues "dev_input").value }}

@@ -220,7 +220,23 @@ def save_message_id(path: str, msg_id: str):
     Path(path).write_text(str(msg_id).strip(), encoding="utf-8")
     print(f"Saved message ID {msg_id} to {path}")
 
-def send_or_edit(webhook_url: str, embeds: list, message_id_file: str):
+def build_components(label: str = "", custom_id: str = "", url: str = "", style: str = "primary"):
+    """Build Discord webhook components for a single button. Returns None if no label."""
+    if not label:
+        return None
+    style_map = {"primary": 1, "secondary": 2, "success": 3, "danger": 4, "link": 5, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "blue": 1, "grey": 2, "green": 3, "red": 4}
+    s = style_map.get(str(style).lower(), 1)
+    button = {"type": 2, "style": s, "label": label}
+    if s == 5:
+        if not url:
+            print(f"Link button requires --button-url, got empty", file=sys.stderr)
+            return None
+        button["url"] = url
+    else:
+        button["custom_id"] = custom_id or label.lower().replace(" ", "_")[:100]
+    return [{"type": 1, "components": [button]}]
+
+def send_or_edit(webhook_url: str, embeds: list, message_id_file: str, components=None):
     webhook_url = webhook_url.strip()
     if not webhook_url:
         webhook_url = os.environ.get("DISCORD_WEBHOOK", "") or os.environ.get("DISCORD_WEBHOOK_URL", "")
@@ -228,6 +244,8 @@ def send_or_edit(webhook_url: str, embeds: list, message_id_file: str):
         print("No webhook URL provided (arg --webhook or env DISCORD_WEBHOOK)", file=sys.stderr)
         sys.exit(1)
     payload = {"embeds": embeds}
+    if components:
+        payload["components"] = components
     existing_id = load_message_id(message_id_file) if message_id_file else ""
     if existing_id:
         print(f"Found existing message ID {existing_id}, trying to edit...")
@@ -301,6 +319,10 @@ if __name__ == "__main__":
     ap.add_argument("--title", type=str, default="Admin Tracker", help="Embed title")
     ap.add_argument("--color", type=str, default=str(DEFAULT_COLOR), help="Embed color (decimal or hex #RRGGBB)")
     ap.add_argument("--emoji", type=str, default=ROBLOX_EMOJI, help="Emoji for each line")
+    ap.add_argument("--button-label", type=str, default="", help="Optional button label (e.g. 'Suggest Developer'). If set, adds a button component to the webhook message. For blue YAGPDB modals use custom_id; for link buttons use --button-url")
+    ap.add_argument("--button-custom-id", type=str, default="", help="Custom ID for blue/green/red/grey buttons (default: label snake_case). For YAGPDB use e.g. 'suggest_developer'")
+    ap.add_argument("--button-url", type=str, default="", help="URL for link buttons (style=link)")
+    ap.add_argument("--button-style", type=str, default="primary", help="Button style: primary/blue (1), secondary/grey (2), success/green (3), danger/red (4), link (5). Default primary")
     ap.add_argument("--dry-run", action="store_true", help="Just print embeds, don't send")
     args = ap.parse_args()
 
@@ -323,11 +345,20 @@ if __name__ == "__main__":
     color_int = parse_color(args.color)
     embeds = build_embeds(data, title=args.title, color=color_int, emoji=args.emoji)
 
+    components = build_components(label=args.button_label, custom_id=args.button_custom_id, url=args.button_url, style=args.button_style)
+    # Auto-add Suggest Developer blue button for Developer Tracker if no explicit button but title matches (opt-in via flag is preferred)
+    # Leave empty by default so Admin/Video Star stay clean; Developer workflow can pass --button-* to enable.
+
     if args.dry_run:
-        print(json.dumps({"embeds": embeds}, indent=2))
+        out = {"embeds": embeds}
+        if components:
+            out["components"] = components
+        print(json.dumps(out, indent=2))
         print(f"\n# Embeds: {len(embeds)}, total chars: {sum(len(e['description']) for e in embeds)}", file=sys.stderr)
+        if components:
+            print(f"# Components: {json.dumps(components)}", file=sys.stderr)
         sys.exit(0)
 
     webhook = args.webhook or os.environ.get("DISCORD_WEBHOOK", "")
     msg_id_file = args.message_id_file
-    send_or_edit(webhook, embeds, msg_id_file)
+    send_or_edit(webhook, embeds, msg_id_file, components=components)

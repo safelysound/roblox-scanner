@@ -1,0 +1,9 @@
+-- YAGPDB Custom Command #0 --
+-- Trigger Type: Command (Trigger: suggest_setup) OR Slash Command --
+-- Run once in #1551385647703396433 to create the persistent blue button --
+-- Paste this into the Code box, Save, then in Discord type -suggest_setup --
+
+{{ $button := cbutton "label" "Suggest Developer" "custom_id" "suggest_developer" "style" "primary" }}
+{{ $embed := cembed "title" "Developer Tracker" "description" "Have a developer to suggest? Click below." "color" 0 }}
+{{ $msg := complexMessage "embed" $embed "buttons" (cslice $button) }}
+{{ sendMessage nil $msg }}
