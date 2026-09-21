@@ -1,6 +1,6 @@
 # Developer IDs — edit this file to update tracked developers without rerunning workflow
 # One ID per line, "#" for comments. Changes take effect on next 5-min scheduled run.
-# Merged Twin Atlas Developers (92) + existing 6 = 94 unique — updated 2026-09-21
+# Merged Twin Atlas Developers (92) + existing 6 = 94 + brandonisbulk = 95 unique — updated 2026-09-21
 302562
 630810
 792733
@@ -61,6 +61,7 @@
 324390732
 377960069
 387258039
+388550953
 420124805
 456392424
 467919920
