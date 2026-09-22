@@ -32,7 +32,7 @@ DEFAULT_UNIVERSE_ID = 10766456501
 # Reads alt cookie that Follows the 102 devs. Presence then returns InGame instead of Offline.
 # Supports: ROBLOSECURITY, ROBLOX_COOKIE, ROBLOSECURITY_1 (all read, first found used)
 def _get_roblox_cookie() -> str:
-    for key in ["ROBLOSECURITY", "ROBLOX_COOKIE", "ROBLOSECURITY_1", "ROBLOSECURITY_2", "ROBLOSECURITY_3", "ROBLOSECURITY_4", "ROBLOSECURITY_5", "ROBLOSECURITY_6", "ROBLOSECURITY1", "ROBLOSECURITY2"]:
+    for key in ["ROBLOX_COOKIE", "ROBLOSECURITY", "ROBLOSECURITY_1", "ROBLOSECURITY_2", "ROBLOSECURITY_3", "ROBLOSECURITY_4", "ROBLOSECURITY_5", "ROBLOSECURITY_6", "ROBLOSECURITY1", "ROBLOSECURITY2"]:
         val = os.environ.get(key, "")
         if val and val.strip():
             v = val.strip().strip('"').strip("'")
@@ -50,10 +50,10 @@ def _cookie_headers() -> Dict[str, str]:
     return base
 
 def _get_all_cookies():
-    """Return list of (key, cookie) for all 6 accounts, deduped by value."""
+    """Return list of (key, cookie) for all 6 accounts, deduped by value. Prioritize ROBLOX_COOKIE (main 10218002102) first."""
     pool=[]
     seen=set()
-    for key in ["ROBLOSECURITY", "ROBLOX_COOKIE", "ROBLOSECURITY_1", "ROBLOSECURITY_2", "ROBLOSECURITY_3", "ROBLOSECURITY_4", "ROBLOSECURITY_5", "ROBLOSECURITY_6"]:
+    for key in ["ROBLOX_COOKIE", "ROBLOSECURITY", "ROBLOSECURITY_1", "ROBLOSECURITY_2", "ROBLOSECURITY_3", "ROBLOSECURITY_4", "ROBLOSECURITY_5", "ROBLOSECURITY_6"]:
         val = __import__("os").environ.get(key, "")
         if val and val.strip():
             v = val.strip().strip('"').strip("'")
@@ -240,12 +240,46 @@ def _presence_with_cookie(user_id, ck, tok=None, sess=None):
 def _profile_shows_hunt(user_id, headers):
     """Profile scraping fallback for hidden even when Following (e.g., 91512961, 92501615).
     Tries multiple endpoints that the website uses to show Hunt when Following.
-    Free fix: get CSRF from HTML meta (not auth.roblox.com which 401s from datacenter), then presence with CSRF.
+    Free fix: get CSRF from HTML meta (not auth.roblox.com which 401s), then presence with CSRF — tries pool.
     """
     import requests as _req, re, sys, time, json
-    ck=headers.get("Cookie","")
+    # Try pool in order so the cookie that actually follows reveals Hunt
+    pool=_get_all_cookies()
+    # Build candidate cookies: pool first, then fallback to headers cookie
+    candidates=[]
+    seen=set()
+    for _,c in pool:
+        cc=f".ROBLOSECURITY={c}"
+        if cc not in seen:
+            candidates.append(cc)
+            seen.add(cc)
+    hdr_ck=headers.get("Cookie","")
+    if hdr_ck and hdr_ck not in seen:
+        candidates.append(hdr_ck)
+    # We will loop over candidates inside; for now set ck to first candidate for html_text path
+    ck=candidates[0] if candidates else headers.get("Cookie","")
     html_text=""
     csrf_from_html=None
+    # Helper to try presence with a given ck
+    def _try_presence_with_ck(try_ck, tok):
+        try:
+            sess=_seeded_session(try_ck)
+            h3={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Content-Type":"application/json","Accept":"application/json","Referer":f"https://www.roblox.com/users/{user_id}/profile","Origin":"https://www.roblox.com","Cookie": try_ck, "x-csrf-token": tok}
+            r3=sess.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=h3)
+            print(f"profile scrape {user_id}: CSRF presence via {try_ck[:20]}... status {r3.status_code}, body {r3.text[:300]!r}", file=sys.stderr)
+            if r3.status_code==200:
+                j=r3.json().get("userPresences",[{}])[0]
+                pid=j.get("placeId")
+                if pid and str(pid)=="74205509034203":
+                    print(f"profile scrape {user_id}: found Hunt via presence+CSRF pool", file=sys.stderr)
+                    return True
+                if j.get("universeId")==10766456501:
+                    print(f"profile scrape {user_id}: found Hunt via universe+CSRF pool", file=sys.stderr)
+                    return True
+        except Exception as e:
+            print(f"profile scrape {user_id} pool presence error {e}", file=sys.stderr)
+        return False
+
     # Use Session to keep RBXID + alt cookie together (helps bypass 9002)
     sess=_req.Session()
     sess.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36","Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8","Accept-Language":"en-US,en;q=0.9","Accept-Encoding":"gzip, deflate","Cache-Control":"no-cache","Pragma":"no-cache"})
@@ -305,61 +339,57 @@ def _profile_shows_hunt(user_id, headers):
             print(f"profile scrape {user_id}: no Hunt in HTML (first 500 chars: {t[:500]!r})", file=sys.stderr)
     except Exception as e:
         print(f"profile scrape {user_id} HTML error {e}", file=sys.stderr)
-    # Try 2: Presence with CSRF (profile's XHR includes x-csrf-token) - this is what the profile's JS actually does
-    # Prefer HTML CSRF (free, not datacenter-blocked) then fallback to auth endpoint
+    # Try 2: Presence with CSRF — try each pool cookie until Hunt found
     try:
-        tok=csrf_from_html
-        r2=None
-        if not tok:
-            r2=sess.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Cookie": ck, "Referer":"https://www.roblox.com/", "Origin":"https://www.roblox.com"})
-            tok=r2.headers.get("x-csrf-token")
-            print(f"profile scrape {user_id}: CSRF token {tok[:8] if tok else None} status {r2.status_code} (auth fallback)", file=sys.stderr)
-        else:
-            print(f"profile scrape {user_id}: using HTML CSRF {tok[:8]}...", file=sys.stderr)
-        if tok:
-            h3={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Content-Type":"application/json","Accept":"application/json","Referer":f"https://www.roblox.com/users/{user_id}/profile","Origin":"https://www.roblox.com","Cookie": ck, "x-csrf-token": tok}
-            r3=sess.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=h3)
-            print(f"profile scrape {user_id}: CSRF presence status {r3.status_code}, body {r3.text[:300]!r}", file=sys.stderr)
-            if r3.status_code==200:
-                j=r3.json().get("userPresences",[{}])[0]
-                pid=j.get("placeId")
-                print(f"profile scrape {user_id}: CSRF presence pid {pid} universe {j.get('universeId')}", file=sys.stderr)
-                if pid and str(pid)=="74205509034203":
-                    print(f"profile scrape {user_id}: found Hunt via presence+CSRF", file=sys.stderr)
-                    return True
-                if j.get("universeId")==10766456501:
-                    print(f"profile scrape {user_id}: found Hunt via universe+CSRF", file=sys.stderr)
-                    return True
-            # Also try without Origin but with Referer (some endpoints require)
-            if r3.status_code in (403,401):
-                h3b={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Content-Type":"application/json","Accept":"application/json","Referer":"https://www.roblox.com/","Cookie": ck, "x-csrf-token": tok}
-                r3b=sess.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=h3b)
-                print(f"profile scrape {user_id}: CSRF retry status {r3b.status_code}, body {r3b.text[:300]!r}", file=sys.stderr)
-                if r3b.status_code==200:
-                    j=r3b.json().get("userPresences",[{}])[0]
-                    if j.get("placeId") and str(j.get("placeId"))=="74205509034203":
-                        print(f"profile scrape {user_id}: found Hunt via presence+CSRF retry", file=sys.stderr)
-                        return True
+        # Build token per candidate
+        for try_ck in candidates:
+            sess=_seeded_session(try_ck)
+            tok=csrf_from_html
+            if not tok:
+                try:
+                    r2=sess.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Cookie": try_ck, "Referer":"https://www.roblox.com/", "Origin":"https://www.roblox.com"})
+                    tok=r2.headers.get("x-csrf-token")
+                    print(f"profile scrape {user_id}: CSRF token {tok[:8] if tok else None} status {r2.status_code} (auth fallback) via {try_ck[:14]}", file=sys.stderr)
+                except: pass
+            else:
+                print(f"profile scrape {user_id}: using HTML CSRF {tok[:8]}... via {try_ck[:14]}", file=sys.stderr)
+            if tok and _try_presence_with_ck(try_ck, tok):
+                return True
+            # Also try without Origin
+            if tok:
+                try:
+                    sess2=_seeded_session(try_ck)
+                    h3b={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Content-Type":"application/json","Accept":"application/json","Referer":"https://www.roblox.com/","Cookie": try_ck, "x-csrf-token": tok}
+                    r3b=sess2.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=h3b)
+                    print(f"profile scrape {user_id}: CSRF retry status {r3b.status_code}, body {r3b.text[:300]!r} via {try_ck[:14]}", file=sys.stderr)
+                    if r3b.status_code==200:
+                        j=r3b.json().get("userPresences",[{}])[0]
+                        if j.get("placeId") and str(j.get("placeId"))=="74205509034203":
+                            print(f"profile scrape {user_id}: found Hunt via presence+CSRF retry pool", file=sys.stderr)
+                            return True
+                except: pass
     except Exception as e:
         print(f"profile scrape {user_id} CSRF presence error {e}", file=sys.stderr)
-    # Try 3: Mobile presence endpoint (bypasses web challenge datacenter)
+    # Try 3: Mobile presence endpoint — loop pool
     try:
         import requests as _req3, sys as _sys3
-        tok3 = csrf_from_html
-        h_mobile = {"User-Agent":"Roblox/Android","Accept":"application/json","Cookie": ck} if ck else {"User-Agent":"Roblox/Android"}
-        if tok3:
-            h_mobile["x-csrf-token"] = tok3
-            h_mobile["Referer"]="https://www.roblox.com/"
-        r_m = sess.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=h_mobile)
-        print(f"profile scrape {user_id}: mobile presence status {r_m.status_code} body {r_m.text[:300]!r}", file=_sys3.stderr)
-        if r_m.status_code==200:
-            j = r_m.json().get("userPresences",[{}])[0]
-            if j.get("placeId") and str(j.get("placeId"))=="74205509034203":
-                print(f"profile scrape {user_id}: found Hunt via mobile presence", file=_sys3.stderr)
-                return True
-            if j.get("universeId")==10766456501:
-                print(f"profile scrape {user_id}: found Hunt via mobile universe", file=_sys3.stderr)
-                return True
+        for try_ck in candidates:
+            tok3 = csrf_from_html
+            h_mobile = {"User-Agent":"Roblox/Android","Accept":"application/json","Cookie": try_ck}
+            if tok3:
+                h_mobile["x-csrf-token"] = tok3
+                h_mobile["Referer"]="https://www.roblox.com/"
+            sess_m=_seeded_session(try_ck)
+            r_m = sess_m.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=h_mobile)
+            print(f"profile scrape {user_id}: mobile presence via {try_ck[:14]} status {r_m.status_code} body {r_m.text[:300]!r}", file=_sys3.stderr)
+            if r_m.status_code==200:
+                j = r_m.json().get("userPresences",[{}])[0]
+                if j.get("placeId") and str(j.get("placeId"))=="74205509034203":
+                    print(f"profile scrape {user_id}: found Hunt via mobile presence pool", file=_sys3.stderr)
+                    return True
+                if j.get("universeId")==10766456501:
+                    print(f"profile scrape {user_id}: found Hunt via mobile universe pool", file=_sys3.stderr)
+                    return True
     except Exception as e:
         print(f"profile scrape {user_id} mobile presence error {e}", file=__import__("sys").stderr)
     print(f"profile scrape {user_id}: no Hunt found after all tries", file=sys.stderr)
