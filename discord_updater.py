@@ -6,12 +6,18 @@ Discord webhook auto-editing updater for Roblox Group Scanner.
   Title: <title>, Color: <color>
   Description:
     - <emoji> [DisplayName (@Username)](https://www.roblox.com/users/ID/profile)
-      - Playing: [Game Name](https://www.roblox.com/games/PLACEID/Game-Name)
-    - ... (Hunt first, then Unknown)
-    - Playing: **Unknown** (Must Follow — game hidden even when Following) if presenceType 1/2/3 but game hidden, else **Unknown** (don't assume Hunt)
+      - Playing: [The Hunt: Roblox 20](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20) (Must Follow to Join)  [if InGame Hunt via Follow]
+      - Playing: [The Hunt Roblox 20](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20) (Appearing Offline - Must Follow to Join)  [if Offline Hunt via Follow]
+    - Only Hunt is shown; all other states filtered out per user spec 2026-09-22:
+      * InGame hidden even when Following -> Do not show
+      * InGame Hunt visible when Following -> Must Follow to Join
+      * InGame non-Hunt visible when Following -> Do not show
+      * Offline -> Do not show
+      * Offline Hunt visible when Following -> Appearing Offline - Must Follow to Join
+      * Offline non-Hunt visible when Following -> Do not show
     -# Last updated: <t:UNIX:R>
 
-- Filters: excludes anyone confirmed NOT playing Hunt — only Hunt + Unknown remain
+- Filters: ONLY Hunt visible via Following; everything else hidden
 - Pagination: if description >4000 chars, splits into 2+ embeds (up to 10), each title/color. Auto-reverts to 1 when fits. Total 6000.
 - First run: POST ?wait=true -> gets message_id, saves to file
 - Next runs: PATCH /messages/{id} to edit same message
@@ -72,14 +78,17 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
     target = data.get("target_game_players", [])
     other = data.get("other_game_players", [])
 
-    # Filter: exclude confirmed NOT playing Hunt — Keep Hunt + Unknown
+    # Filter: ONLY show Hunt visible via Following per spec 2026-09-22
+    # - InGame hidden even when Following -> Do not show
+    # - InGame Hunt visible when Following -> show (Must Follow to Join)
+    # - InGame non-Hunt visible -> Do not show
+    # - Offline -> Do not show
+    # - Offline Hunt visible when Following -> show (Appearing Offline - Must Follow to Join)
+    # - Offline non-Hunt visible -> Do not show
     filtered = []
     for u in target + other:
         pid = u.get("placeId") or u.get("rootPlaceId")
-        uid = u.get("universeId")
         if pid is not None and str(pid) == TARGET_PLACE_ID:
-            filtered.append(u)
-        elif pid is None and uid is None:
             filtered.append(u)
         else:
             continue
@@ -108,20 +117,22 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
         effective_place = place_id or root_place
         game_name, game_url = get_game_link(effective_place, universe_id, last_loc)
 
-        if game_name and game_url:
-            safe_game = game_name.replace("[", "\\[").replace("]", "\\]")
-            playing = f"[{safe_game}]({game_url})"
+        # Only Hunt is shown — per spec, determine label by presenceType
+        # InGame Hunt visible when Following -> Must Follow to Join
+        # Offline Hunt visible when Following -> Appearing Offline - Must Follow to Join
+        ptype = u.get("presenceType")
+        try:
+            ptype_int = int(ptype) if ptype is not None else None
+        except:
+            ptype_int = None
+
+        if ptype_int == 0:
+            # Offline but Hunt shown via Following = Appearing Offline
+            playing = f"[The Hunt Roblox 20]({TARGET_GAME_URL}) (Appearing Offline - Must Follow to Join)"
         else:
-            # Game hidden — don't assume Hunt. User 92501615 proved InGame hidden even when Following stays hidden.
-            ptype = u.get("presenceType")
-            try:
-                ptype_int = int(ptype) if ptype is not None else None
-            except:
-                ptype_int = None
-            if ptype_int in (1, 2, 3):
-                playing = "**Unknown** (Must Follow — game hidden even when Following)"
-            else:
-                playing = "**Unknown**"
+            # InGame (1/2/3) Hunt visible via Following — includes Online/InStudio as InGame per spec
+            # Note: spec says "The Hunt: Roblox 20" with colon for InGame
+            playing = f"[The Hunt: Roblox 20]({TARGET_GAME_URL}) (Must Follow to Join)"
 
         line = f"- {emoji} [{display} (@{username})]({profile})\n  - Playing: {playing}"
         lines.append(line)
