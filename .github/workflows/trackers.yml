@@ -1,4 +1,4 @@
-name: Trackers (Admin / Video Stars / Developers) — unified
+name: Trackers (Admin / Video Stars / Developers) - unified
 
 on:
   workflow_dispatch:
@@ -20,23 +20,20 @@ on:
   schedule:
     - cron: '*/5 * * * *'
 
-concurrency:
-  group: trackers-${{ matrix.tracker }}-${{ matrix.shard }}
-  cancel-in-progress: false
-
 permissions:
   contents: write
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    concurrency:
+      group: trackers-scan-${{ matrix.tracker }}-${{ matrix.shard }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
         tracker: [admin, video-stars, developers]
         shard: [0, 1, 2]
-        # run only requested tracker if workflow_dispatch with single
-        # GitHub matrix filtering not native, so we run all and skip via if
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,10 +45,6 @@ jobs:
 
       - name: Install deps
         run: pip install requests pyyaml tqdm
-
-      - name: Filter tracker (if single requested)
-        if: ${{ inputs.tracker != 'all' && inputs.tracker != '' && matrix.tracker != inputs.tracker }}
-        run: echo "Skipping ${{ matrix.tracker }} (requested ${{ inputs.tracker }})" && exit 0
 
       - name: Run ${{ matrix.tracker }} shard ${{ matrix.shard }}/3
         if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
@@ -65,19 +58,13 @@ jobs:
           ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
         run: |
           echo "Tracker ${{ matrix.tracker }} shard ${{ matrix.shard }}/3"
-          if [ -n "${{ inputs.tracker }}" ] && [ "${{ inputs.tracker }}" != "all" ] && [ "${{ matrix.tracker }}" != "${{ inputs.tracker }}" ]; then
-            echo "Skipped via filter"
-            mkdir -p shards
-            echo '{"meta":{"groupId":"skipped"},"summary":{"total_members":0,"target_game_count":0,"other_game_count":0,"offline_count":0},"target_game_players":[],"other_game_players":[],"offline_or_website":[]}' > shard_${{ matrix.tracker }}_${{ matrix.shard }}.json
-            exit 0
-          fi
           MAX_ARGS=""
           if [ -n "${{ inputs.max_members }}" ]; then
             MAX_ARGS="--max-members ${{ inputs.max_members }}"
           fi
           python tracker_scanner.py --tracker ${{ matrix.tracker }} --place-id "${{ inputs.place_id || '74205509034203' }}" --shard ${{ matrix.shard }} --shards 3 --json shard_${{ matrix.tracker }}_${{ matrix.shard }}.json --verbose $MAX_ARGS
           ls -lh shard_${{ matrix.tracker }}_${{ matrix.shard }}.json
-          cat shard_${{ matrix.tracker }}_${{ matrix.shard }}.json | head -c 1500; echo
+          cat shard_${{ matrix.tracker }}_${{ matrix.shard }}.json | head -c 2000; echo
 
       - name: Upload shard artifact
         if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
@@ -92,6 +79,9 @@ jobs:
     needs: scan
     runs-on: ubuntu-latest
     if: always()
+    concurrency:
+      group: trackers-merge-${{ matrix.tracker }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -110,11 +100,8 @@ jobs:
       - name: Install deps
         run: pip install requests pyyaml
 
-      - name: Filter merge (if single requested)
-        if: ${{ inputs.tracker != 'all' && inputs.tracker != '' && matrix.tracker != inputs.tracker }}
-        run: echo "Skipping merge ${{ matrix.tracker }}" && exit 0
-
       - name: Download shards for ${{ matrix.tracker }}
+        if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
         uses: actions/download-artifact@v4
         with:
           pattern: shard-${{ matrix.tracker }}-*
@@ -122,11 +109,13 @@ jobs:
           path: shards
 
       - name: Debug shards
+        if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
         run: |
           ls -R | head -n 100
           ls -lh shards/ || echo "no shards"
 
       - name: Merge ${{ matrix.tracker }}
+        if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
         run: |
           SHARDS=$(find shards . -name "shard_${{ matrix.tracker }}_*.json" 2>/dev/null | tr '\n' ' ')
           echo "Found shards: $SHARDS"
@@ -134,7 +123,6 @@ jobs:
             echo "No shards for ${{ matrix.tracker }}, skipping"
             exit 0
           fi
-          # map tracker id to output names and expected artifact
           case "${{ matrix.tracker }}" in
             admin) OUT_JSON="roblox_scan_results.json"; OUT_CSV="roblox_scan_results.csv";;
             video-stars) OUT_JSON="roblox_scan_results_video.json"; OUT_CSV="roblox_scan_results_video.csv";;
@@ -142,10 +130,10 @@ jobs:
           esac
           python merge_shards.py $SHARDS --json $OUT_JSON --csv $OUT_CSV
           ls -lh $OUT_JSON $OUT_CSV
-          python -m json.tool $OUT_JSON | head -n 120
+          python -m json.tool $OUT_JSON | head -n 150
 
       - name: Upload final ${{ matrix.tracker }}
-        if: ${{ hashFiles('roblox_scan_results*.json') != '' }}
+        if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
         uses: actions/upload-artifact@v4
         with:
           name: final-results-${{ matrix.tracker }}
@@ -156,48 +144,63 @@ jobs:
           if-no-files-found: warn
 
       - name: Restore Discord message ID
+        if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
         uses: actions/cache@v4
         with:
-          path: ${{ matrix.tracker == 'admin' && 'discord_message_id.txt' || matrix.tracker == 'video-stars' && 'discord_message_id_video_stars.txt' || 'discord_message_id_developers.txt' }}
+          path: discord_message_id_${{ matrix.tracker }}.txt
           key: discord-message-id-${{ matrix.tracker }}
           restore-keys: |
             discord-message-id-${{ matrix.tracker }}
 
       - name: Discord webhook for ${{ matrix.tracker }}
-        if: always()
+        if: always() && (inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker)
         env:
-          DISCORD_WEBHOOK: ${{ matrix.tracker == 'admin' && secrets.DISCORD_WEBHOOK || matrix.tracker == 'video-stars' && secrets.DISCORD_WEBHOOK_VIDEO_STARS || secrets.DISCORD_WEBHOOK_DEVELOPERS }}
           TRACKER: ${{ matrix.tracker }}
+          DISCORD_WEBHOOK_ADMIN: ${{ secrets.DISCORD_WEBHOOK }}
+          DISCORD_WEBHOOK_VIDEO: ${{ secrets.DISCORD_WEBHOOK_VIDEO_STARS }}
+          DISCORD_WEBHOOK_DEVS: ${{ secrets.DISCORD_WEBHOOK_DEVELOPERS }}
         run: |
           case "$TRACKER" in
-            admin) FILE="roblox_scan_results.json"; TITLE="Admin Tracker"; COLOR="#305778"; EMOJI="<:roblox:1551329066337050754>"; MSG_FILE="discord_message_id.txt"; REPO_FILE=".github/discord_message_id.txt";;
-            video-stars) FILE="roblox_scan_results_video.json"; TITLE="Video Star Tracker"; COLOR="#F9E999"; EMOJI="<:verified:1551329029783691334>"; MSG_FILE="discord_message_id_video_stars.txt"; REPO_FILE=".github/discord_message_id_video_stars.txt";;
-            developers) FILE="roblox_scan_results_developers.json"; TITLE="Developer Tracker"; COLOR="#000000"; EMOJI="<:developer:1551388816324169838>"; MSG_FILE="discord_message_id_developers.txt"; REPO_FILE=".github/discord_message_id_developers.txt";;
+            admin) FILE="roblox_scan_results.json"; TITLE="Admin Tracker"; COLOR="#305778"; EMOJI="<:roblox:1551329066337050754>"; MSG_FILE="discord_message_id.txt"; CACHE_FILE="discord_message_id_admin.txt"; REPO_FILE=".github/discord_message_id.txt"; WEBHOOK="$DISCORD_WEBHOOK_ADMIN";;
+            video-stars) FILE="roblox_scan_results_video.json"; TITLE="Video Star Tracker"; COLOR="#F9E999"; EMOJI="<:verified:1551329029783691334>"; MSG_FILE="discord_message_id_video_stars.txt"; CACHE_FILE="discord_message_id_video-stars.txt"; REPO_FILE=".github/discord_message_id_video_stars.txt"; WEBHOOK="$DISCORD_WEBHOOK_VIDEO";;
+            developers) FILE="roblox_scan_results_developers.json"; TITLE="Developer Tracker"; COLOR="#000000"; EMOJI="<:developer:1551388816324169838>"; MSG_FILE="discord_message_id_developers.txt"; CACHE_FILE="discord_message_id_developers.txt"; REPO_FILE=".github/discord_message_id_developers.txt"; WEBHOOK="$DISCORD_WEBHOOK_DEVS";;
           esac
           if [ ! -f "$FILE" ]; then echo "No $FILE, skipping discord"; exit 0; fi
-          if [ -z "$DISCORD_WEBHOOK" ]; then echo "No webhook secret for $TRACKER, skipping"; exit 0; fi
-          if [ -f "$REPO_FILE" ]; then echo "Restoring from $REPO_FILE"; cp "$REPO_FILE" "$MSG_FILE"; fi
+          if [ -z "$WEBHOOK" ]; then echo "No webhook secret for $TRACKER, skipping"; exit 0; fi
+          # Restore from repo file or cache file (new unified cache name vs old per-tracker files)
+          if [ -f "$REPO_FILE" ]; then
+            echo "Restoring from $REPO_FILE"
+            cp "$REPO_FILE" "$MSG_FILE"
+          elif [ -f "$CACHE_FILE" ]; then
+            echo "Restoring from cache $CACHE_FILE"
+            cp "$CACHE_FILE" "$MSG_FILE"
+          fi
           echo "Posting $TITLE $COLOR $EMOJI"
-          python discord_updater.py "$FILE" --webhook "$DISCORD_WEBHOOK" --message-id-file "$MSG_FILE" --title "$TITLE" --color "$COLOR" --emoji "$EMOJI" 2>&1 | head -n 100
+          python discord_updater.py "$FILE" --webhook "$WEBHOOK" --message-id-file "$MSG_FILE" --title "$TITLE" --color "$COLOR" --emoji "$EMOJI" 2>&1 | head -n 150
           echo "--- Embed preview ---"
-          python discord_updater.py "$FILE" --title "$TITLE" --color "$COLOR" --emoji "$EMOJI" --dry-run | head -n 80
+          python discord_updater.py "$FILE" --title "$TITLE" --color "$COLOR" --emoji "$EMOJI" --dry-run | head -n 100
+          # Copy back to cache file for save step
+          if [ -f "$MSG_FILE" ]; then cp "$MSG_FILE" "$CACHE_FILE"; fi
 
       - name: Save Discord message ID
-        if: always()
+        if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
         uses: actions/cache/save@v4
         with:
-          path: ${{ matrix.tracker == 'admin' && 'discord_message_id.txt' || matrix.tracker == 'video-stars' && 'discord_message_id_video_stars.txt' || 'discord_message_id_developers.txt' }}
-          key: discord-message-id-${{ matrix.tracker }}-${{ hashFiles('discord_message_id*.txt') }}
+          path: discord_message_id_${{ matrix.tracker }}.txt
+          key: discord-message-id-${{ matrix.tracker }}-${{ hashFiles('discord_message_id_*.txt', 'discord_message_id.txt') }}
         continue-on-error: true
 
       - name: Persist Discord message ID to repo
-        if: always()
+        if: always() && (inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker)
         run: |
           case "${{ matrix.tracker }}" in
             admin) MSG_FILE="discord_message_id.txt"; REPO_FILE=".github/discord_message_id.txt";;
             video-stars) MSG_FILE="discord_message_id_video_stars.txt"; REPO_FILE=".github/discord_message_id_video_stars.txt";;
             developers) MSG_FILE="discord_message_id_developers.txt"; REPO_FILE=".github/discord_message_id_developers.txt";;
           esac
+          # also check cache file variant
+          CACHE_FILE="discord_message_id_${{ matrix.tracker }}.txt"
+          if [ -f "$CACHE_FILE" ] && [ ! -f "$MSG_FILE" ]; then cp "$CACHE_FILE" "$MSG_FILE"; fi
           if [ -f "$MSG_FILE" ]; then
             mkdir -p .github
             cp "$MSG_FILE" "$REPO_FILE"
