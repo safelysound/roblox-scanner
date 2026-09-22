@@ -11,9 +11,8 @@ on:
         description: 'Target PlaceId'
         required: false
         default: '74205509034203'
-  # schedule disabled on test branch - manual only
-  # schedule:
-  #   - cron: '*/5 * * * *'
+  schedule:
+    - cron: '*/5 * * * *'
 
 concurrency:
   group: developer-scan
@@ -46,6 +45,10 @@ jobs:
           ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
           ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
           ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
+          ROBLOSECURITY_2: ${{ secrets.ROBLOSECURITY_2 }}
+          ROBLOSECURITY_3: ${{ secrets.ROBLOSECURITY_3 }}
+          ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
+          ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
         run: |
           echo "Running Developer shard ${{ matrix.shard }} of 3"
           cat config/developer_ids.txt
@@ -145,10 +148,10 @@ jobs:
       - name: Discord webhook (Developer Tracker)
         if: always()
         env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_DEVELOPERS_TEST }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_DEVELOPERS }}
         run: |
           if [ -z "$DISCORD_WEBHOOK" ]; then
-            echo "No DISCORD_WEBHOOK_DEVELOPERS_TEST secret set - skipping"
+            echo "No DISCORD_WEBHOOK_DEVELOPERS secret set - skipping"
             exit 0
           fi
           if [ -f .github/discord_message_id_developers.txt ]; then

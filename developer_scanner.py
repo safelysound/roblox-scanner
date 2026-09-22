@@ -49,20 +49,33 @@ def _cookie_headers() -> Dict[str, str]:
         base["Cookie"] = f".ROBLOSECURITY={ck}"
     return base
 
+def _get_all_cookies():
+    """Return list of (key, cookie) for all 6 accounts, deduped by value."""
+    pool=[]
+    seen=set()
+    for key in ["ROBLOSECURITY", "ROBLOX_COOKIE", "ROBLOSECURITY_1", "ROBLOSECURITY_2", "ROBLOSECURITY_3", "ROBLOSECURITY_4", "ROBLOSECURITY_5", "ROBLOSECURITY_6"]:
+        val = __import__("os").environ.get(key, "")
+        if val and val.strip():
+            v = val.strip().strip('"').strip("'")
+            if v.startswith(".ROBLOSECURITY="):
+                v = v.split("=",1)[1].strip().strip('"').strip("'")
+            if v and v not in seen:
+                seen.add(v)
+                pool.append((key, v))
+    return pool
+
 def _log_cookie_status():
-    ck = _get_roblox_cookie()
-    if ck:
-        # Log suffix too (masked) to detect truncation, and env source
-        src = next((k for k in ["ROBLOSECURITY", "ROBLOX_COOKIE", "ROBLOSECURITY_1"] if __import__("os").environ.get(k)), "unknown")
-        suf = ck[-20:] if len(ck)>=20 else ck
-        has_warn = "_|WARNING" in ck
-        has_pipe = ck.count("|")
-        print(f"Using {src} cookie len {len(ck)} prefix {ck[:20]!r} suffix {suf!r} warn={has_warn} pipes={has_pipe} — authenticated presence", file=sys.stderr)
-        # Quick validation via mobileapi (less challenged than users.roblox.com)
+    pool=_get_all_cookies()
+    if pool:
+        print(f"Cookie pool: {len(pool)} accounts — {[k for k,_ in pool]}", file=sys.stderr)
+        for k,ck in pool:
+            suf = ck[-12:] if len(ck)>=12 else ck
+            print(f"  {k}: len {len(ck)} prefix {ck[:14]!r} suffix {suf!r} warn={'_|WARNING' in ck}", file=sys.stderr)
+        # Quick validation via mobileapi for first cookie
         try:
             import requests as _rq, sys as _sys
-            # Try mobileapi/userinfo which often returns auth even when users endpoint 9002s
-            r=_rq.get("https://www.roblox.com/mobileapi/userinfo", timeout=10, headers={"User-Agent":"Roblox/Android","Cookie": f".ROBLOSECURITY={ck}", "Referer":"https://www.roblox.com/"})
+            _, ck0 = pool[0]
+            r=_rq.get("https://www.roblox.com/mobileapi/userinfo", timeout=10, headers={"User-Agent":"Roblox/Android","Cookie": f".ROBLOSECURITY={ck0}", "Referer":"https://www.roblox.com/"})
             print(f"mobileapi check {r.status_code} body {r.text[:400]!r}", file=_sys.stderr)
         except Exception as e:
             print(f"mobileapi check error {e}", file=__import__("sys").stderr)
@@ -120,6 +133,91 @@ def _seeded_session(ck):
         s.get("https://www.roblox.com/home", timeout=10)
     except: pass
     return s
+
+FOLLOW_API = "https://friends.roblox.com/v1/users/{uid}/follow"
+
+def _get_csrf_from_session(sess):
+    """Try HTML CSRF first (www not 9002-blocked), fallback to auth."""
+    import re, sys
+    try:
+        rh=sess.get("https://www.roblox.com/home", timeout=10, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Referer":"https://www.roblox.com/"})
+        if rh.status_code==200:
+            m=re.search(r'<meta\s+name="csrf-token"\s+[^>]*data-token="([^"]+)"', rh.text)
+            if not m:
+                m=re.search(r'<meta\s+name="csrf-token"\s+[^>]*content="([^"]+)"', rh.text)
+            if not m:
+                m=re.search(r"Roblox\.XsrfToken\.setToken\('([^']+)'\)", rh.text)
+            if m:
+                return m.group(1)
+    except Exception as e:
+        print(f"csrf html error {e}", file=sys.stderr)
+    try:
+        r=sess.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"User-Agent":"Mozilla/5.0","Referer":"https://www.roblox.com/","Origin":"https://www.roblox.com"})
+        tok=r.headers.get("x-csrf-token")
+        if tok:
+            return tok
+    except: pass
+    return None
+
+def _follow_with_pool(target_uid, pool):
+    """Try to follow target_uid using pool in order. On 429/Challenge, try next. Returns (success, key_used)."""
+    import sys, time
+    for idx, (key, ck) in enumerate(pool):
+        sess=_seeded_session(f".ROBLOSECURITY={ck}")
+        tok=_get_csrf_from_session(sess)
+        headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Referer":"https://www.roblox.com/","Origin":"https://www.roblox.com","Accept":"application/json","Cookie": f".ROBLOSECURITY={ck}"}
+        if tok:
+            headers["x-csrf-token"]=tok
+        url=FOLLOW_API.format(uid=target_uid)
+        try:
+            r=sess.post(url, timeout=15, headers=headers)
+            txt=r.text[:300] if r.text else ""
+            print(f"follow {target_uid} via {key} -> {r.status_code} {txt!r}", file=sys.stderr)
+            if r.status_code in (200,201):
+                try:
+                    j=r.json()
+                    if j.get("success") is True or r.status_code==200:
+                        return (True, key, sess, tok)
+                except:
+                    return (True, key, sess, tok)
+                return (True, key, sess, tok)
+            if r.status_code==400 and "already" in r.text.lower():
+                print(f"follow {target_uid} already following via {key}", file=sys.stderr)
+                return (True, key, sess, tok)
+            if r.status_code in (429, 403):
+                # rate limited or challenge - try next account
+                if "challenge" in r.text.lower() or r.status_code==429:
+                    print(f"pool {key} rate limited/challenge for {target_uid} ({r.status_code}), trying next", file=sys.stderr)
+                    time.sleep(0.8)
+                    continue
+            # other error try next
+            if r.status_code not in (200,400):
+                time.sleep(0.5)
+                continue
+        except Exception as e:
+            print(f"follow {target_uid} via {key} error {e}", file=sys.stderr)
+            time.sleep(0.5)
+            continue
+    return (False, None, None, None)
+
+def _presence_with_cookie(user_id, ck, tok=None, sess=None):
+    """Fetch presence for single user_id using specific cookie + token, return placeId/universeId."""
+    import sys
+    if sess is None:
+        sess=_seeded_session(f".ROBLOSECURITY={ck}")
+    if tok is None:
+        tok=_get_csrf_from_session(sess)
+    headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Content-Type":"application/json","Accept":"application/json","Referer":f"https://www.roblox.com/users/{user_id}/profile","Origin":"https://www.roblox.com","Cookie": f".ROBLOSECURITY={ck}"}
+    if tok:
+        headers["x-csrf-token"]=tok
+    try:
+        r=sess.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=headers)
+        if r.status_code==200:
+            j=r.json().get("userPresences",[{}])[0]
+            return (j.get("placeId"), j.get("universeId"), j.get("gameId"), j.get("lastLocation"))
+    except Exception as e:
+        print(f"presence_with_cookie error {e}", file=sys.stderr)
+    return (None,None,None,None)
 
 def _profile_shows_hunt(user_id, headers):
     """Profile scraping fallback for hidden even when Following (e.g., 91512961, 92501615).
@@ -455,12 +553,31 @@ def main():
     presences=fetch_presences(ids_for_presence)
     print(f"Got {len(presences)}/{len(ids_for_presence)} presence responses")
 
-    # Fetch followings for isFollowing flag (if cookie present)
+    # Fetch followings for isFollowing flag using pool (any of 6 follows -> true)
     headers_for_follow=_cookie_headers()
-    my_id=_get_my_id(headers_for_follow)
-    followings=_get_followings(my_id, headers_for_follow) if my_id else set()
-    if my_id:
-        print(f"Alt {my_id} following {len(followings)} for isFollowing flag")
+    pool=_get_all_cookies()
+    followings=set()
+    my_ids=[]
+    for key, ck in pool:
+        hdr={"Cookie": f".ROBLOSECURITY={ck}"}
+        mid=_get_my_id(hdr)
+        if mid:
+            my_ids.append(mid)
+            f=_get_followings(mid, hdr)
+            print(f"pool {key} -> my_id {mid} following {len(f)}", file=sys.stderr)
+            followings.update(f)
+    # fallback single if pool empty
+    if not pool:
+        my_id=_get_my_id(headers_for_follow)
+        if my_id:
+            my_ids.append(my_id)
+            followings=_get_followings(my_id, headers_for_follow)
+    if my_ids:
+        print(f"Pool {len(pool)} accounts my_ids {my_ids} total unique followings {len(followings)} for isFollowing", file=sys.stderr)
+        my_id=my_ids[0]  # keep for per-user fallback
+    else:
+        my_id=None
+        print("Pool no my_id - unauthenticated", file=sys.stderr)
 
     # Categorize same as group scanner
     target=[]
@@ -516,6 +633,75 @@ def main():
             other.append(enriched)
         else:
             offline.append(enriched)
+
+    # Auto-follow Unknowns using 6-account pool (aggressive parallel, order fallback on 429)
+    # Unknown = InGame hidden not Following (placeId null) -> currently in 'other' as placeholder for Unknown
+    unknown_uids = [u["userId"] for u in other if u.get("placeId") is None and u.get("universeId") is None and u.get("presenceType")==2 and not u.get("isFollowing")]
+    if unknown_uids:
+        pool=_get_all_cookies()
+        print(f"Auto-follow: {len(unknown_uids)} Unknowns {unknown_uids} using pool {[k for k,_ in pool]}", file=sys.stderr)
+        # Use pool in order, aggressive but with fallback
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time as _time
+        def _process_one(uid):
+            ok, key_used, sess_used, tok_used = _follow_with_pool(uid, pool)
+            if not ok:
+                print(f"auto-follow {uid} failed on all {len(pool)} accounts", file=sys.stderr)
+                return (uid, False, None)
+            # Brief wait for Roblox to propagate follow
+            _time.sleep(1.2)
+            # Re-check presence with the successful follow cookie
+            _, ck_used = next(((k,c) for k,c in pool if k==key_used), (None,None))
+            place, univ2, gameId2, lastLoc2 = _presence_with_cookie(uid, ck_used, tok_used, sess_used)
+            print(f"auto-follow {uid} via {key_used} re-check place {place} univ {univ2} lastLoc {lastLoc2!r}", file=sys.stderr)
+            if place and str(place)=="74205509034203":
+                return (uid, True, "hunt")
+            if univ2==10766456501:
+                return (uid, True, "hunt")
+            # If still hidden but we followed, check profile scrape as fallback
+            # Use the same session to see if Hunt appears via presence+CSRF path
+            # If not Hunt, treat as hidden non-Hunt -> will stay hidden (spec_keep hides it)
+            # We keep isFollowing true but place still null means filtered out per spec
+            return (uid, True, "followed_not_hunt")
+        # Aggressive parallel: up to 3 workers at once (free, still 429-safe with pool fallback)
+        workers = min(3, len(unknown_uids))
+        results={}
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs={ex.submit(_process_one, uid): uid for uid in unknown_uids}
+            for fut in as_completed(futs):
+                uid=futs[fut]
+                try:
+                    uid_r, ok, status = fut.result()
+                    results[uid_r]=(ok,status)
+                except Exception as e:
+                    print(f"auto-follow thread {uid} error {e}", file=sys.stderr)
+                    results[uid]=(False, None)
+        # Update other/target based on re-check
+        new_other=[]
+        new_target=list(target)
+        for u in other:
+            uid=u["userId"]
+            if uid in results and results[uid][0]:
+                ok, status = results[uid]
+                u["isFollowing"]=True
+                if status=="hunt":
+                    # Promote to Hunt
+                    u["placeId"]=74205509034203
+                    u["rootPlaceId"]=74205509034203
+                    u["universeId"]=10766456501
+                    u["lastLocation"]="The Hunt: Roblox 20"
+                    new_target.append(u)
+                    print(f"auto-follow promote {uid} to Hunt", file=sys.stderr)
+                else:
+                    # Followed but not Hunt -> per spec_keep, hide (don't keep in other)
+                    # So drop it (offline-like) — don't add to new_other
+                    print(f"auto-follow {uid} followed but not Hunt -> hide per spec", file=sys.stderr)
+                    continue
+            else:
+                # Either not Unknown or follow failed -> keep as is for Unknown display
+                new_other.append(u)
+        other=new_other
+        target=new_target
 
     target.sort(key=lambda x: (x["username"] or "").lower())
     other.sort(key=lambda x: ((x["lastLocation"] or ""), (x["username"] or "").lower()))
