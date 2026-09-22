@@ -160,44 +160,62 @@ def _get_csrf_from_session(sess):
     return None
 
 def _follow_with_pool(target_uid, pool):
-    """Try to follow target_uid using pool in order. On 429/Challenge, try next. Returns (success, key_used)."""
-    import sys, time
+    """Try to follow target_uid using pool in order. On 429/Challenge/XSRF, try next token then next account."""
+    import sys, time, re
     for idx, (key, ck) in enumerate(pool):
         sess=_seeded_session(f".ROBLOSECURITY={ck}")
-        tok=_get_csrf_from_session(sess)
-        headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Referer":"https://www.roblox.com/","Origin":"https://www.roblox.com","Accept":"application/json","Cookie": f".ROBLOSECURITY={ck}"}
-        if tok:
-            headers["x-csrf-token"]=tok
-        url=FOLLOW_API.format(uid=target_uid)
+        # Try HTML CSRF first, then auth CSRF if HTML fails with XSRF invalid
+        toks=[]
+        t1=_get_csrf_from_session(sess)
+        if t1:
+            toks.append(t1)
+        # Also try direct auth token as second attempt
         try:
-            r=sess.post(url, timeout=15, headers=headers)
-            txt=r.text[:300] if r.text else ""
-            print(f"follow {target_uid} via {key} -> {r.status_code} {txt!r}", file=sys.stderr)
-            if r.status_code in (200,201):
-                try:
-                    j=r.json()
-                    if j.get("success") is True or r.status_code==200:
+            r2=sess.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"User-Agent":"Mozilla/5.0","Referer":"https://www.roblox.com/","Origin":"https://www.roblox.com"})
+            t2=r2.headers.get("x-csrf-token")
+            if t2 and t2 not in toks:
+                toks.append(t2)
+                print(f"follow {target_uid} via {key} got auth CSRF {t2[:6]}...", file=sys.stderr)
+        except: pass
+        if not toks:
+            toks=[None]
+        for tok in toks:
+            headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Referer":"https://www.roblox.com/users/{}/profile".format(target_uid),"Origin":"https://www.roblox.com","Accept":"application/json","Cookie": f".ROBLOSECURITY={ck}"}
+            if tok:
+                headers["x-csrf-token"]=tok
+            url=FOLLOW_API.format(uid=target_uid)
+            try:
+                r=sess.post(url, timeout=15, headers=headers)
+                txt=r.text[:400] if r.text else ""
+                print(f"follow {target_uid} via {key} tok {tok[:6] if tok else None} -> {r.status_code} {txt!r}", file=sys.stderr)
+                if r.status_code in (200,201):
+                    try:
+                        j=r.json()
+                        if j.get("success") is True or r.status_code==200:
+                            return (True, key, sess, tok)
+                    except:
                         return (True, key, sess, tok)
-                except:
                     return (True, key, sess, tok)
-                return (True, key, sess, tok)
-            if r.status_code==400 and "already" in r.text.lower():
-                print(f"follow {target_uid} already following via {key}", file=sys.stderr)
-                return (True, key, sess, tok)
-            if r.status_code in (429, 403):
-                # rate limited or challenge - try next account
-                if "challenge" in r.text.lower() or r.status_code==429:
-                    print(f"pool {key} rate limited/challenge for {target_uid} ({r.status_code}), trying next", file=sys.stderr)
-                    time.sleep(0.8)
+                if r.status_code==400 and "already" in r.text.lower():
+                    print(f"follow {target_uid} already following via {key}", file=sys.stderr)
+                    return (True, key, sess, tok)
+                if "XSRF token invalid" in txt or "Token Validation Failed" in txt:
+                    print(f"pool {key} XSRF invalid with tok {tok[:6] if tok else None}, trying next tok/account", file=sys.stderr)
+                    time.sleep(0.5)
+                    continue  # try next tok
+                if r.status_code in (429, 403):
+                    if "challenge" in r.text.lower() or r.status_code==429:
+                        print(f"pool {key} rate limited/challenge for {target_uid} ({r.status_code}), trying next account", file=sys.stderr)
+                        time.sleep(0.8)
+                        break  # break tok loop, continue to next account
+                if r.status_code not in (200,400):
+                    time.sleep(0.5)
                     continue
-            # other error try next
-            if r.status_code not in (200,400):
+            except Exception as e:
+                print(f"follow {target_uid} via {key} error {e}", file=sys.stderr)
                 time.sleep(0.5)
                 continue
-        except Exception as e:
-            print(f"follow {target_uid} via {key} error {e}", file=sys.stderr)
-            time.sleep(0.5)
-            continue
+        # end tok loop -> next account
     return (False, None, None, None)
 
 def _presence_with_cookie(user_id, ck, tok=None, sess=None):
