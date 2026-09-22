@@ -510,7 +510,84 @@ def load_user_ids(path: str) -> List[int]:
         sys.exit(1)
     return uniq
 
+def fetch_user_infos(user_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Batched POST to users.roblox.com/v1/users — 1 request per 100 IDs, with 429 retry.
+    Replaces sequential GET loop that 429s after ~7 requests (see 2026-09-22 debug: 28/35 failed with 0.05s delay).
+    """
+    result: Dict[int, Dict[str, Any]] = {}
+    if not user_ids:
+        return result
+    # dedup preserve order
+    seen=set()
+    uniq=[]
+    for uid in user_ids:
+        if uid not in seen:
+            seen.add(uid)
+            uniq.append(uid)
+    import random as _rand
+    headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json", "Accept": "application/json"}
+    for start in range(0, len(uniq), 100):
+        batch = uniq[start:start+100]
+        success=False
+        for attempt in range(1, 6):
+            try:
+                r = requests.post("https://users.roblox.com/v1/users", json={"userIds": batch}, timeout=15, headers=headers)
+                if r.status_code == 429:
+                    wait = r.headers.get("Retry-After")
+                    try:
+                        wait_f = float(wait) if wait else (2 ** attempt)
+                    except:
+                        wait_f = 2 ** attempt
+                    # datacenter 429 bursts: wait proper time
+                    print(f"Users batch {start//100} 429 attempt {attempt} wait {wait_f:.1f}s", file=sys.stderr)
+                    time.sleep(wait_f + _rand.uniform(0, 1))
+                    continue
+                if r.status_code == 200:
+                    for entry in r.json().get("data", []):
+                        uid = entry.get("id")
+                        if uid is not None:
+                            result[uid] = {"userId": uid, "username": entry.get("name"), "displayName": entry.get("displayName"), "hasVerifiedBadge": entry.get("hasVerifiedBadge", False)}
+                    success=True
+                    break
+                else:
+                    print(f"Users batch {start//100} attempt {attempt} status {r.status_code}: {r.text[:200]}", file=sys.stderr)
+                    time.sleep(1 + attempt + _rand.uniform(0, 1))
+            except Exception as e:
+                print(f"Users batch error {e} attempt {attempt}", file=sys.stderr)
+                time.sleep(1 + attempt + _rand.uniform(0, 1))
+        # fill any missing in this batch (fallback single GET, then user<id>)
+        for uid in batch:
+            if uid not in result:
+                try:
+                    rg = requests.get(USERS_API.format(user_id=uid), timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+                    if rg.status_code == 200:
+                        j = rg.json()
+                        result[uid] = {"userId": j.get("id"), "username": j.get("name"), "displayName": j.get("displayName"), "hasVerifiedBadge": j.get("hasVerifiedBadge", False)}
+                        print(f"Users batch fallback GET ok {uid} -> {result[uid]['username']}", file=sys.stderr)
+                        time.sleep(0.2)
+                        continue
+                    else:
+                        print(f"Users fallback GET {uid} status {rg.status_code}", file=sys.stderr)
+                except Exception as e:
+                    print(f"Users fallback GET {uid} error {e}", file=sys.stderr)
+                result[uid] = {"userId": uid, "username": f"user{uid}", "displayName": f"user{uid}", "hasVerifiedBadge": False}
+                print(f"Users fallback user{uid} for failed batch (will show as user(UserID))", file=sys.stderr)
+        if start + 100 < len(uniq):
+            time.sleep(0.4 + _rand.uniform(0, 0.3))
+    return result
+
 def fetch_user_info(user_id: int) -> Dict[str, Any]:
+    # wrapper using batched endpoint with retry (fixes sequential GET 429)
+    try:
+        infos = fetch_user_infos([user_id])
+        if user_id in infos and infos[user_id].get("username") and not infos[user_id]["username"].startswith("user"):
+            return infos[user_id]
+        # if fallback triggered, still return it (better than extra GET)
+        if user_id in infos:
+            return infos[user_id]
+    except Exception as e:
+        print(f"fetch_user_info batch wrapper error {e}", file=sys.stderr)
+    # last resort single GET (old behaviour)
     try:
         r = requests.get(USERS_API.format(user_id=user_id), timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code == 200:
@@ -622,14 +699,13 @@ def main():
     if game_name:
         print(f'Target game: "{game_name}" Universe {universe}')
 
-    # Fetch user infos for display names (for those in slice)
+    # Fetch user infos for display names (for those in slice) — batched POST fixes 429 flood (0.05s GET -> 28/35 fails)
+    infos = fetch_user_infos(ids_for_presence)
     members=[]
     for uid in ids_for_presence:
-        info=fetch_user_info(uid)
-        # Need role/rank for compatibility with group scanner — use Developer tag
+        info=infos.get(uid) or fetch_user_info(uid)
         info.update({"role": "Developer", "rank": 255, "roleId": 0})
         members.append(info)
-        time.sleep(0.1)
 
     presences=fetch_presences(ids_for_presence)
     print(f"Got {len(presences)}/{len(ids_for_presence)} presence responses")

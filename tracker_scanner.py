@@ -33,6 +33,7 @@ try:
     _get_csrf_from_session = _dev._get_csrf_from_session
     _profile_shows_hunt = _dev._profile_shows_hunt
     fetch_user_info = _dev.fetch_user_info
+    fetch_user_infos = _dev.fetch_user_infos if hasattr(_dev, 'fetch_user_infos') else None
     fetch_presences = _dev.fetch_presences
     _get_followings = _dev._get_followings
     _cookie_headers = _dev._cookie_headers
@@ -69,6 +70,40 @@ except Exception as e:
                 j=r.json(); return {"userId":j.get("id"),"username":j.get("name"),"displayName":j.get("displayName"),"hasVerifiedBadge":j.get("hasVerifiedBadge",False)}
         except: pass
         return {"userId":uid,"username":f"user{uid}","displayName":f"user{uid}","hasVerifiedBadge":False}
+    def fetch_user_infos(uids):
+        # fallback batched POST (same as developer_scanner) to avoid 429 flood
+        res={}
+        if not uids: return res
+        import random as _rand
+        seen=set(); uniq=[]
+        for u in uids:
+            if u not in seen:
+                seen.add(u); uniq.append(u)
+        headers={"User-Agent":"Mozilla/5.0","Content-Type":"application/json","Accept":"application/json"}
+        for s in range(0,len(uniq),100):
+            batch=uniq[s:s+100]
+            for attempt in range(1,6):
+                try:
+                    r=requests.post("https://users.roblox.com/v1/users", json={"userIds":batch}, timeout=15, headers=headers)
+                    if r.status_code==429:
+                        wait=r.headers.get("Retry-After")
+                        try: w=float(wait) if wait else (2**attempt)
+                        except: w=2**attempt
+                        time.sleep(w+_rand.uniform(0,1))
+                        continue
+                    if r.status_code==200:
+                        for e in r.json().get("data",[]):
+                            res[e["id"]]={"userId":e["id"],"username":e.get("name"),"displayName":e.get("displayName"),"hasVerifiedBadge":e.get("hasVerifiedBadge",False)}
+                        break
+                    else:
+                        time.sleep(1+attempt)
+                except: time.sleep(1+attempt)
+            for uid in batch:
+                if uid not in res:
+                    res[uid]={"userId":uid,"username":f"user{uid}","displayName":f"user{uid}","hasVerifiedBadge":False}
+            if s+100 < len(uniq):
+                time.sleep(0.4)
+        return res
     def fetch_presences(uids):
         return {}
     def _get_followings(mid, hdr): return set()
@@ -309,23 +344,43 @@ def tracker_main_logic():
             file_ids=file_ids[:args.max_members]
         if verbose:
             print(f"IDS file {ids_file}: {len(file_ids)} IDs", file=sys.stderr)
-        for uid in file_ids:
-            if any(m["userId"]==uid for m in all_members):
-                continue
-            info = fetch_user_info(uid)
-            info.update({"role": "Developer", "rank": 255, "roleId": 0})
-            all_members.append(info)
-            time.sleep(0.05)
+        # Batched fetch fixes 429 flood: sequential GET 0.05s delay → 28/35 failed -> user(UserID)
+        # Use POST /v1/users batch 100 with retry (developer_scanner.fetch_user_infos)
+        if file_ids:
+            needed = [uid for uid in file_ids if not any(m["userId"]==uid for m in all_members)]
+            if needed:
+                try:
+                    if 'fetch_user_infos' in globals() and fetch_user_infos:
+                        infos = fetch_user_infos(needed)
+                    else:
+                        infos = {uid: fetch_user_info(uid) for uid in needed}
+                except Exception as e:
+                    print(f"batch fetch_user_infos failed {e}, falling back per-uid", file=sys.stderr)
+                    infos = {}
+                    for uid in needed:
+                        infos[uid]=fetch_user_info(uid)
+                        time.sleep(0.05)
+                for uid in needed:
+                    info = infos.get(uid) or fetch_user_info(uid)
+                    info.update({"role": "Developer", "rank": 255, "roleId": 0})
+                    all_members.append(info)
     if extra_ids:
         if verbose:
             print(f"Extra IDs: {extra_ids}", file=sys.stderr)
-        for uid in extra_ids:
-            if any(m["userId"]==uid for m in all_members):
-                continue
-            info = fetch_user_info(uid)
-            info.update({"role": "Developer", "rank": 255, "roleId": 0})
-            all_members.append(info)
-            time.sleep(0.05)
+        extra_needed = [uid for uid in extra_ids if not any(m["userId"]==uid for m in all_members)]
+        if extra_needed:
+            try:
+                if 'fetch_user_infos' in globals() and fetch_user_infos:
+                    extra_infos = fetch_user_infos(extra_needed)
+                else:
+                    extra_infos = {uid: fetch_user_info(uid) for uid in extra_needed}
+            except Exception as e:
+                print(f"batch extra_ids fetch failed {e}", file=sys.stderr)
+                extra_infos = {uid: fetch_user_info(uid) for uid in extra_needed}
+            for uid in extra_needed:
+                info = extra_infos.get(uid) or fetch_user_info(uid)
+                info.update({"role": "Developer", "rank": 255, "roleId": 0})
+                all_members.append(info)
     if not all_members:
         print("No members/IDs found for tracker", file=sys.stderr)
         sys.exit(1)
