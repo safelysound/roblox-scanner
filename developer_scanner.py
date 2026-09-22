@@ -84,7 +84,6 @@ def _log_cookie_status():
         print("No ROBLOSECURITY/ROBLOX_COOKIE found — unauthenticated presence (Offline-hidden devs will stay Offline)", file=sys.stderr)
         return False
 
-
 def _get_my_id(headers):
     # Use Session to preserve RBXID etc; also check www.roblox.com/home for auth
     try:
@@ -134,8 +133,6 @@ def _seeded_session(ck):
     except: pass
     return s
 
-FOLLOW_API = "https://friends.roblox.com/v1/users/{uid}/follow"
-
 def _get_csrf_from_session(sess):
     """Try HTML CSRF first (www not 9002-blocked), fallback to auth."""
     import re, sys
@@ -158,95 +155,6 @@ def _get_csrf_from_session(sess):
             return tok
     except: pass
     return None
-
-def _follow_with_pool(target_uid, pool):
-    """Follow Unknown to categorize — tries pool in order with follow_all.py backoff (12s + exponential Challenge/429). Returns success."""
-    import sys, time, random
-    # Use 12s base delay (5/min safe for datacenter) + jitter, and 15/30/60/120 backoff for Challenge/429
-    RETRY_BACKOFF=[15,30,60,120]
-    for attempt in range(1,5):  # up to 4 attempts per account before switching
-        for key, ck in pool:
-            sess=_seeded_session(f".ROBLOSECURITY={ck}")
-            # Get fresh CSRF via auth (most reliable for friends) — also update session header
-            tok=None
-            try:
-                r=sess.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"User-Agent":"Mozilla/5.0","Referer":"https://www.roblox.com/","Origin":"https://www.roblox.com"})
-                tok=r.headers.get("x-csrf-token")
-                if tok:
-                    sess.headers["x-csrf-token"]=tok
-                    print(f"follow {target_uid} via {key} CSRF {tok[:6]}... attempt {attempt}", file=sys.stderr)
-            except: pass
-            if not tok:
-                tok=_get_csrf_from_session(sess)
-            headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Referer":f"https://www.roblox.com/users/{target_uid}/profile","Origin":"https://www.roblox.com","Accept":"application/json","Content-Type":"application/json","Cookie": f".ROBLOSECURITY={ck}"}
-            if tok:
-                headers["x-csrf-token"]=tok
-            url=FOLLOW_API.format(uid=target_uid)
-            try:
-                r=sess.post(url, timeout=15, headers=headers)
-                txt=r.text[:400] if r.text else ""
-                # Refresh CSRF if returned
-                new_tok=r.headers.get("x-csrf-token")
-                if new_tok and new_tok!=tok:
-                    sess.headers["x-csrf-token"]=new_tok
-                    print(f"follow {target_uid} via {key} refreshed CSRF {new_tok[:6]}...", file=sys.stderr)
-                print(f"follow {target_uid} via {key} attempt {attempt} -> {r.status_code} {txt!r}", file=sys.stderr)
-                if r.status_code in (200,201):
-                    return (True, key, sess, tok or new_tok)
-                if r.status_code==400 and "already" in txt.lower():
-                    print(f"follow {target_uid} already following via {key}", file=sys.stderr)
-                    return (True, key, sess, tok)
-                # XSRF invalid -> refresh and retry same account next attempt
-                if "XSRF token invalid" in txt or "Token Validation Failed" in txt:
-                    print(f"pool {key} XSRF invalid, will retry {key} next attempt", file=sys.stderr)
-                    time.sleep(1.5 + random.uniform(0,1))
-                    continue
-                # Challenge or 429 -> backoff then try next account (or same next attempt)
-                if r.status_code==429 or (r.status_code==403 and "challenge" in txt.lower()):
-                    wait=RETRY_BACKOFF[min(attempt-1, len(RETRY_BACKOFF)-1)] + random.uniform(0,2)
-                    # Respect Retry-After if present
-                    try:
-                        ra=r.headers.get("Retry-After")
-                        if ra:
-                            wait=max(wait, float(ra))
-                    except: pass
-                    challenge=r.headers.get("rblx-challenge-type") or r.headers.get("rblx-challenge-id") or ""
-                    print(f"pool {key} Challenge/429 for {target_uid} ({r.status_code}) {challenge} wait {wait:.1f}s, trying next account", file=sys.stderr)
-                    time.sleep(min(wait, 3))  # in scanner we only sleep 3s max per try to stay fast; full backoff happens across attempts
-                    break
-                if r.status_code not in (200,400):
-                    time.sleep(1 + random.uniform(0,1))
-            except Exception as e:
-                print(f"follow {target_uid} via {key} error {e}", file=sys.stderr)
-                time.sleep(1)
-            # Small delay between pool accounts (aggressive but not hammer)
-            time.sleep(1.2 + random.uniform(0,0.8))
-        # End pool loop for this attempt
-        # Wait before next full pool attempt (exponential)
-        if attempt < 4:
-            wait=RETRY_BACKOFF[min(attempt-1, len(RETRY_BACKOFF)-1)]
-            print(f"follow {target_uid} full pool attempt {attempt} done, backoff {wait}s before retry", file=sys.stderr)
-            time.sleep(min(wait, 5))  # cap in-scan wait to 5s so 5-min job doesn't timeout; remaining retries next scheduled run
-    return (False, None, None, None)
-
-def _presence_with_cookie(user_id, ck, tok=None, sess=None):
-    """Fetch presence for single user_id using specific cookie + token, return placeId/universeId."""
-    import sys
-    if sess is None:
-        sess=_seeded_session(f".ROBLOSECURITY={ck}")
-    if tok is None:
-        tok=_get_csrf_from_session(sess)
-    headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Content-Type":"application/json","Accept":"application/json","Referer":f"https://www.roblox.com/users/{user_id}/profile","Origin":"https://www.roblox.com","Cookie": f".ROBLOSECURITY={ck}"}
-    if tok:
-        headers["x-csrf-token"]=tok
-    try:
-        r=sess.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=headers)
-        if r.status_code==200:
-            j=r.json().get("userPresences",[{}])[0]
-            return (j.get("placeId"), j.get("universeId"), j.get("gameId"), j.get("lastLocation"))
-    except Exception as e:
-        print(f"presence_with_cookie error {e}", file=sys.stderr)
-    return (None,None,None,None)
 
 def _profile_shows_hunt(user_id, headers):
     """Profile scraping fallback for hidden even when Following (e.g., 91512961, 92501615).
@@ -461,7 +369,6 @@ def _get_followings(my_id, headers):
     except Exception as e:
         print(f"followings error {e}", file=__import__("sys").stderr)
     return following
-
 
 def resolve_universe_id(place_id: int) -> Optional[int]:
     try:
@@ -790,75 +697,6 @@ def main():
             other.append(enriched)
         else:
             offline.append(enriched)
-
-    # Auto-follow Unknowns using 6-account pool (aggressive parallel, order fallback on 429)
-    # Unknown = InGame hidden not Following (placeId null) -> currently in 'other' as placeholder for Unknown
-    unknown_uids = [u["userId"] for u in other if u.get("placeId") is None and u.get("universeId") is None and u.get("presenceType")==2 and not u.get("isFollowing")]
-    if unknown_uids:
-        pool=_get_all_cookies()
-        print(f"Auto-follow: {len(unknown_uids)} Unknowns {unknown_uids} using pool {[k for k,_ in pool]}", file=sys.stderr)
-        # Use pool in order, aggressive but with fallback
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import time as _time
-        def _process_one(uid):
-            ok, key_used, sess_used, tok_used = _follow_with_pool(uid, pool)
-            if not ok:
-                print(f"auto-follow {uid} failed on all {len(pool)} accounts", file=sys.stderr)
-                return (uid, False, None)
-            # Brief wait for Roblox to propagate follow
-            _time.sleep(1.2)
-            # Re-check presence with the successful follow cookie
-            _, ck_used = next(((k,c) for k,c in pool if k==key_used), (None,None))
-            place, univ2, gameId2, lastLoc2 = _presence_with_cookie(uid, ck_used, tok_used, sess_used)
-            print(f"auto-follow {uid} via {key_used} re-check place {place} univ {univ2} lastLoc {lastLoc2!r}", file=sys.stderr)
-            if place and str(place)=="74205509034203":
-                return (uid, True, "hunt")
-            if univ2==10766456501:
-                return (uid, True, "hunt")
-            # If still hidden but we followed, check profile scrape as fallback
-            # Use the same session to see if Hunt appears via presence+CSRF path
-            # If not Hunt, treat as hidden non-Hunt -> will stay hidden (spec_keep hides it)
-            # We keep isFollowing true but place still null means filtered out per spec
-            return (uid, True, "followed_not_hunt")
-        # Aggressive parallel: up to 3 workers at once (free, still 429-safe with pool fallback)
-        workers = min(3, len(unknown_uids))
-        results={}
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs={ex.submit(_process_one, uid): uid for uid in unknown_uids}
-            for fut in as_completed(futs):
-                uid=futs[fut]
-                try:
-                    uid_r, ok, status = fut.result()
-                    results[uid_r]=(ok,status)
-                except Exception as e:
-                    print(f"auto-follow thread {uid} error {e}", file=sys.stderr)
-                    results[uid]=(False, None)
-        # Update other/target based on re-check
-        new_other=[]
-        new_target=list(target)
-        for u in other:
-            uid=u["userId"]
-            if uid in results and results[uid][0]:
-                ok, status = results[uid]
-                u["isFollowing"]=True
-                if status=="hunt":
-                    # Promote to Hunt
-                    u["placeId"]=74205509034203
-                    u["rootPlaceId"]=74205509034203
-                    u["universeId"]=10766456501
-                    u["lastLocation"]="The Hunt: Roblox 20"
-                    new_target.append(u)
-                    print(f"auto-follow promote {uid} to Hunt", file=sys.stderr)
-                else:
-                    # Followed but not Hunt -> per spec_keep, hide (don't keep in other)
-                    # So drop it (offline-like) — don't add to new_other
-                    print(f"auto-follow {uid} followed but not Hunt -> hide per spec", file=sys.stderr)
-                    continue
-            else:
-                # Either not Unknown or follow failed -> keep as is for Unknown display
-                new_other.append(u)
-        other=new_other
-        target=new_target
 
     target.sort(key=lambda x: (x["username"] or "").lower())
     other.sort(key=lambda x: ((x["lastLocation"] or ""), (x["username"] or "").lower()))
