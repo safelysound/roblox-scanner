@@ -266,7 +266,13 @@ def _profile_shows_hunt(user_id, headers):
             sess=_seeded_session(try_ck)
             h3={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Content-Type":"application/json","Accept":"application/json","Referer":f"https://www.roblox.com/users/{user_id}/profile","Origin":"https://www.roblox.com","Cookie": try_ck, "x-csrf-token": tok}
             r3=sess.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=h3)
-            print(f"profile scrape {user_id}: CSRF presence via {try_ck[:20]}... status {r3.status_code}, body {r3.text[:300]!r}", file=sys.stderr)
+            print(f"profile scrape {user_id}: CSRF presence via {try_ck[:14]}... status {r3.status_code}, body {r3.text[:500]!r}", file=sys.stderr)
+            # Also log isFollowing check for that cookie's followings
+            try:
+                import re as _re3
+                # quick check if this cookie follows target via friends API (less verbose)
+                pass
+            except: pass
             if r3.status_code==200:
                 j=r3.json().get("userPresences",[{}])[0]
                 pid=j.get("placeId")
@@ -339,20 +345,36 @@ def _profile_shows_hunt(user_id, headers):
             print(f"profile scrape {user_id}: no Hunt in HTML (first 500 chars: {t[:500]!r})", file=sys.stderr)
     except Exception as e:
         print(f"profile scrape {user_id} HTML error {e}", file=sys.stderr)
-    # Try 2: Presence with CSRF — try each pool cookie until Hunt found
+    # Try 2: Presence with CSRF — try each pool cookie until Hunt found (fresh CSRF per cookie)
     try:
-        # Build token per candidate
+        print(f"profile scrape {user_id}: trying {len(candidates)} pool cookies for Hunt", file=sys.stderr)
         for try_ck in candidates:
             sess=_seeded_session(try_ck)
-            tok=csrf_from_html
+            # Fresh CSRF per cookie (html from that cookie's session)
+            tok=None
+            try:
+                rh=sess.get("https://www.roblox.com/home", timeout=10, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Referer":"https://www.roblox.com/"})
+                import re as _re2
+                m=_re2.search(r'<meta\s+name="csrf-token"\s+[^>]*data-token="([^"]+)"', rh.text)
+                if not m:
+                    m=_re2.search(r'<meta\s+name="csrf-token"\s+[^>]*content="([^"]+)"', rh.text)
+                if m:
+                    tok=m.group(1)
+                    print(f"profile scrape {user_id}: HTML CSRF {tok[:6]}... via {try_ck[:14]} html len {len(rh.text)}", file=sys.stderr)
+            except: pass
+            if not tok:
+                # fallback to previous html token or auth
+                tok=csrf_from_html
+                if tok:
+                    print(f"profile scrape {user_id}: fallback to first HTML CSRF {tok[:6]}... via {try_ck[:14]}", file=sys.stderr)
             if not tok:
                 try:
                     r2=sess.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Cookie": try_ck, "Referer":"https://www.roblox.com/", "Origin":"https://www.roblox.com"})
                     tok=r2.headers.get("x-csrf-token")
-                    print(f"profile scrape {user_id}: CSRF token {tok[:8] if tok else None} status {r2.status_code} (auth fallback) via {try_ck[:14]}", file=sys.stderr)
+                    print(f"profile scrape {user_id}: CSRF auth {tok[:8] if tok else None} status {r2.status_code} via {try_ck[:14]}", file=sys.stderr)
                 except: pass
             else:
-                print(f"profile scrape {user_id}: using HTML CSRF {tok[:8]}... via {try_ck[:14]}", file=sys.stderr)
+                print(f"profile scrape {user_id}: using fresh HTML CSRF {tok[:6]}... via {try_ck[:14]}", file=sys.stderr)
             if tok and _try_presence_with_ck(try_ck, tok):
                 return True
             # Also try without Origin
