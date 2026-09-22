@@ -120,12 +120,17 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
     now = int(time.time())
     footer = f"-# Last updated: <t:{now}:R>"
 
-    # Empty case — use tracker-specific no-players line but keep structure
+    # Empty case — tracker-specific no-players line
     if not filtered:
-        # Generic no-players (keep for all trackers)
-        desc = f"No admins currently in-game.\n{footer}"
-        # For Video Stars / Developers we could customize, but keep as is per same style request
-        # If title is not Admin, still show same line (user said keep same embed style)
+        if "developer" in title.lower():
+            empty_msg = "No developers currently in-game."
+        elif "video" in title.lower():
+            empty_msg = "No Video Stars currently in-game."
+        elif "admin" in title.lower():
+            empty_msg = "No admins currently in-game."
+        else:
+            empty_msg = "No one currently in-game."
+        desc = f"{empty_msg}\n{footer}"
         return [{"title": title, "color": color, "description": desc}]
 
     lines = []
@@ -185,10 +190,18 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
     lines = filtered_lines
 
     if not lines:
-        if truncated > 0:
-            desc = f"No admins currently in-game.\n{footer}\n-# +{truncated} more not shown (6000 limit)"
+        if "developer" in title.lower():
+            empty_msg = "No developers currently in-game."
+        elif "video" in title.lower():
+            empty_msg = "No Video Stars currently in-game."
+        elif "admin" in title.lower():
+            empty_msg = "No admins currently in-game."
         else:
-            desc = f"No admins currently in-game.\n{footer}"
+            empty_msg = "No one currently in-game."
+        if truncated > 0:
+            desc = f"{empty_msg}\n{footer}\n-# +{truncated} more not shown (6000 limit)"
+        else:
+            desc = f"{empty_msg}\n{footer}"
         return [{"title": title, "color": color, "description": desc}]
 
     chunks = []
