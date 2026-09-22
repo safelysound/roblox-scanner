@@ -19,9 +19,6 @@ on:
         description: 'Limit members for testing (empty = all)'
         required: false
         default: ''
-  schedule:
-    - cron: '*/5 * * * *'
-
 permissions:
   contents: write
 
