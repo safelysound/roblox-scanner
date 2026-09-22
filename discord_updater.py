@@ -8,7 +8,7 @@ Discord webhook auto-editing updater for Roblox Group Scanner.
     - <emoji> [DisplayName (@Username)](https://www.roblox.com/users/ID/profile)
       - Playing: [Game Name](https://www.roblox.com/games/PLACEID/Game-Name)
     - ... (Hunt first, then Unknown)
-    - Playing: [The Hunt: Roblox 20](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20) (Must Follow to Join) if hidden (requires follow to see)
+    - Playing: [The Hunt: Roblox 20](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20) (Must Follow to Join) ONLY if confirmed requires Follow (presenceType 1/2/3 but game hidden), else Playing: **Unknown**
     -# Last updated: <t:UNIX:R>
 
 - Filters: excludes anyone confirmed NOT playing Hunt — only Hunt + Unknown remain
@@ -112,7 +112,17 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
             safe_game = game_name.replace("[", "\\[").replace("]", "\\]")
             playing = f"[{safe_game}]({game_url})"
         else:
-            playing = f"[The Hunt: Roblox 20]({TARGET_GAME_URL}) (Must Follow to Join)"
+            # Only if CONFIRMED requires Follow to see (Online/InGame/InStudio but game hidden)
+            ptype = u.get("presenceType")
+            # handle int or str
+            try:
+                ptype_int = int(ptype) if ptype is not None else None
+            except:
+                ptype_int = None
+            if ptype_int in (1, 2, 3):
+                playing = f"[The Hunt: Roblox 20]({TARGET_GAME_URL}) (Must Follow to Join)"
+            else:
+                playing = "**Unknown**"
 
         line = f"- {emoji} [{display} (@{username})]({profile})\n  - Playing: {playing}"
         lines.append(line)
