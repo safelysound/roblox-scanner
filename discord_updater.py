@@ -117,6 +117,32 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
         # All other Offline / hidden -> Do not show
         continue
 
+    # Sort by playing hierarchy requested: Hunt (public) -> Hunt (Must Follow) -> Unknown
+    def sort_key(u):
+        pid = u.get("placeId") or u.get("rootPlaceId")
+        is_following = bool(u.get("isFollowing"))
+        ptype = u.get("presenceType")
+        try:
+            ptype_int = int(ptype) if ptype is not None else None
+        except:
+            ptype_int = None
+        is_hunt = pid is not None and str(pid) == TARGET_PLACE_ID
+        if is_hunt and not is_following and ptype_int == 2:
+            prio = 0  # Playing: The Hunt: Roblox 20 (public)
+        elif is_hunt and is_following:
+            prio = 1  # Playing: The Hunt: Roblox 20 (Must Follow to Join) + Appearing Offline
+        elif is_hunt and ptype_int == 0 and is_following:
+            prio = 1
+        elif is_hunt:
+            prio = 0  # fallback Hunt public
+        else:
+            prio = 2  # Unknown
+        # secondary sort alphabetically by displayName/username
+        name = (u.get("displayName") or u.get("username") or "").lower()
+        return (prio, name)
+
+    filtered = sorted(filtered, key=sort_key)
+
     now = int(time.time())
     footer = f"-# Last updated: <t:{now}:R>"
 
