@@ -1,0 +1,40 @@
+name: Video Star Scan
+# LEGACY SHIM — restores old cron URL for cron-job.org
+# Old URL: .../scan-video-stars.yml/dispatches → forwards to trackers.yml tracker=video-stars
+on:
+  workflow_dispatch:
+    inputs:
+      max_members:
+        description: 'Limit members for testing (leave empty for all)'
+        required: false
+        default: ''
+      place_id:
+        description: 'Target PlaceId'
+        required: false
+        default: '74205509034203'
+      group_id:
+        description: 'Group ID'
+        required: false
+        default: '4199740'
+  schedule:
+    - cron: '*/5 * * * *'
+permissions:
+  actions: write
+  contents: write
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Forward to unified tracker
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -x
+          echo "Legacy scan-video-stars.yml triggered — forwarding to trackers.yml tracker=video-stars"
+          RESP=$(curl -s -w " HTTP_CODE:%{http_code}" -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/trackers.yml/dispatches \
+            -d '{"ref":"main","inputs":{"tracker":"video-stars","place_id":"${{ inputs.place_id }}","max_members":"${{ inputs.max_members }}"}}')
+          echo "$RESP"
+          echo "$RESP" | grep -q "HTTP_CODE:204" && echo "Forwarded successfully" || echo "Forward response noted"
