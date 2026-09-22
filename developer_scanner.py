@@ -58,40 +58,6 @@ def _log_cookie_status():
         print("No ROBLOSECURITY/ROBLOX_COOKIE found — unauthenticated presence (Offline-hidden devs will stay Offline)", file=sys.stderr)
         return False
 
-
-def _get_my_id(headers):
-    try:
-        import requests as _req
-        r=_req.get("https://users.roblox.com/v1/users/authenticated", timeout=10, headers={"User-Agent":"Mozilla/5.0","Cookie": headers.get("Cookie","")})
-        if r.status_code==200:
-            return r.json().get("id")
-    except: pass
-    return None
-
-def _get_followings(my_id, headers):
-    following=set()
-    if not my_id:
-        return following
-    try:
-        import requests as _req
-        cursor=""
-        for _ in range(20):
-            url=f"https://friends.roblox.com/v1/users/{my_id}/followings?limit=100&sortOrder=Asc"
-            if cursor:
-                url+=f"&cursor={cursor}"
-            r=_req.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0","Cookie": headers.get("Cookie","")})
-            if r.status_code!=200:
-                break
-            j=r.json()
-            for e in j.get("data",[]):
-                following.add(e["id"])
-            cursor=j.get("nextPageCursor")
-            if not cursor:
-                break
-    except: pass
-    return following
-
-
 def resolve_universe_id(place_id: int) -> Optional[int]:
     try:
         r = requests.get(UNIVERSE_API.format(place_id=place_id), timeout=10, headers={"User-Agent": "Mozilla/5.0"})
@@ -227,13 +193,6 @@ def main():
     presences=fetch_presences(ids_for_presence)
     print(f"Got {len(presences)}/{len(ids_for_presence)} presence responses")
 
-    # Fetch followings for isFollowing flag (if cookie present)
-    headers_for_follow=_cookie_headers()
-    my_id=_get_my_id(headers_for_follow)
-    followings=_get_followings(my_id, headers_for_follow) if my_id else set()
-    if my_id:
-        print(f"Alt {my_id} following {len(followings)} for isFollowing flag")
-
     # Categorize same as group scanner
     target=[]
     other=[]
@@ -256,9 +215,7 @@ def main():
                 is_target=True
             elif place_id==args.place_id or root_place==args.place_id:
                 is_target=True
-        # isFollowing flag for discord_updater to know if Hunt was revealed via Follow
-        is_following = uid in followings if 'followings' in locals() else False
-        enriched={**m, "presenceType": ptype, "presenceTypeName": {0:"Offline",1:"Online",2:"InGame",3:"InStudio"}.get(ptype,str(ptype)), "lastLocation": last_loc, "placeId": place_id, "rootPlaceId": root_place, "universeId": univ, "gameId": pres.get("gameId"), "lastOnline": pres.get("lastOnline"), "isFollowing": is_following, "presence_raw": pres}
+        enriched={**m, "presenceType": ptype, "presenceTypeName": {0:"Offline",1:"Online",2:"InGame",3:"InStudio"}.get(ptype,str(ptype)), "lastLocation": last_loc, "placeId": place_id, "rootPlaceId": root_place, "universeId": univ, "gameId": pres.get("gameId"), "lastOnline": pres.get("lastOnline"), "presence_raw": pres}
         if is_target:
             target.append(enriched)
         elif is_in_game:
