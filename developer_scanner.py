@@ -284,14 +284,17 @@ def main():
                     is_following=True
                     print(f"per-user isFollowing true for {uid}", file=sys.stderr)
             except: pass
-        # Profile scraping fallback for hidden even when Following (e.g., 91512961, 92501615) — website shows Hunt even when presence hides
-        if ptype==2 and place_id is None and root_place is None and univ is None and is_following:
+        # Profile scraping for ANY InGame hidden (isFollowing true/false) — website profile shows Hunt when Following, even when presence API hides (e.g., 91512961)
+        # We check profile for Hunt for all InGame hidden to avoid relying on broken isFollowing bulk fetch (9002). If profile shows Hunt, treat as Hunt.
+        if ptype==2 and place_id is None and root_place is None and univ is None:
             if _profile_shows_hunt(uid, headers_for_follow):
-                print(f"profile scrape: {uid} shows Hunt via profile (hidden presence but Following reveals Hunt)", file=sys.stderr)
+                print(f"profile scrape: {uid} shows Hunt via profile (hidden presence but profile reveals Hunt)", file=sys.stderr)
                 place_id=74205509034203
                 root_place=74205509034203
                 univ=10766456501
                 last_loc="The Hunt: Roblox 20"
+                # Also mark as Following for discord display
+                is_following=True
         enriched={**m, "presenceType": ptype, "presenceTypeName": {0:"Offline",1:"Online",2:"InGame",3:"InStudio"}.get(ptype,str(ptype)), "lastLocation": last_loc, "placeId": place_id, "rootPlaceId": root_place, "universeId": univ, "gameId": pres.get("gameId"), "lastOnline": pres.get("lastOnline"), "isFollowing": is_following, "presence_raw": pres}
         if is_target:
             target.append(enriched)
