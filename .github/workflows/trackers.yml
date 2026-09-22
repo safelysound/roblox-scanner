@@ -1,6 +1,8 @@
 name: Trackers (Admin / Video Stars / Developers) - unified
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       tracker:
