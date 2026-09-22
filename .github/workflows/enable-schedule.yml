@@ -1,24 +1,40 @@
-name: Enable Schedule
+name: Schedule Keepalive
 on:
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/enable-schedule.yml'
-      - '.github/workflows/trackers.yml'
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
 jobs:
-  enable:
+  keepalive:
     runs-on: ubuntu-latest
     permissions:
       actions: write
+    timeout-minutes: 65
     steps:
-      - name: Enable trackers schedule
+      - name: Keepalive dispatch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Attempting to enable trackers workflow 364200727"
-          curl -s -X PUT -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" https://api.github.com/repos/${{ github.repository }}/actions/workflows/364200727/enable -w "HTTP %{http_code}\n"
-          curl -s -X PUT -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" https://api.github.com/repos/${{ github.repository }}/actions/workflows/364265428/enable -w "HTTP %{http_code}\n"
-          echo "Done"
-          # Also try to trigger a workflow_dispatch via API using GH_TOKEN (should have actions:write)
-          echo "Trying workflow_dispatch for trackers"
-          curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" https://api.github.com/repos/${{ github.repository }}/actions/workflows/trackers.yml/dispatches -d '{"ref":"main","inputs":{"tracker":"all"}}' -w "HTTP %{http_code}\n" | head -c 500
+          set -x
+          echo "Event: ${{ github.event_name }}"
+          echo "Re-enabling workflows"
+          curl -s -X PUT -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" https://api.github.com/repos/${{ github.repository }}/actions/workflows/trackers.yml/enable -w " enable_code:%{http_code}\n"
+          curl -s -X PUT -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" https://api.github.com/repos/${{ github.repository }}/actions/workflows/test-schedule.yml/enable -w " enable_code:%{http_code}\n"
+          dispatch() {
+            echo "Dispatching trackers at $(date -u +%H:%M:%S)"
+            curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.v3+json" https://api.github.com/repos/${{ github.repository }}/actions/workflows/trackers.yml/dispatches -d '{"ref":"main","inputs":{"tracker":"all"}}' -w " dispatch_code:%{http_code}\n"
+          }
+          dispatch
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "Push keepalive: will dispatch every 5m for ~55 minutes to bridge scheduler cold-start"
+            for i in 1 2 3 4 5 6 7 8 9 10 11; do
+              echo "Sleep 300s iteration $i/11"
+              sleep 300
+              dispatch
+            done
+            echo "Keepalive loop complete"
+          else
+            echo "Schedule/dispatch event: single dispatch only"
+          fi
