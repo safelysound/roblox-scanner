@@ -1,14 +1,26 @@
-name: "Follow Devs (one-time)"
+name: "Follow (residential - home IP)"
 
 on:
   workflow_dispatch:
     inputs:
+      tracker:
+        description: 'Which to follow (developers, video-stars, admin, all)'
+        required: false
+        default: 'developers'
+        type: choice
+        options: ['developers', 'video-stars', 'admin', 'all']
       dry_run:
         description: 'Dry run (check without following)'
         required: false
         default: 'false'
         type: choice
         options: ['false', 'true']
+      pool:
+        description: 'Cookie pool size (1 = main alt only, 6 = all 6 alts shard 6x faster)'
+        required: false
+        default: '1'
+        type: choice
+        options: ['1', '6']
 
 permissions:
   contents: read
@@ -16,7 +28,7 @@ permissions:
 jobs:
   follow:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 720  # all (3491) needs ~2h with pool 6, ~11h with pool 1
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,7 +39,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install deps
-        run: pip install requests
+        run: pip install requests pyyaml
 
       - name: Dry run check
         if: ${{ inputs.dry_run == 'true' }}
@@ -35,28 +47,35 @@ jobs:
           ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
           ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
           ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
+          ROBLOSECURITY_2: ${{ secrets.ROBLOSECURITY_2 }}
+          ROBLOSECURITY_3: ${{ secrets.ROBLOSECURITY_3 }}
+          ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
+          ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
         run: |
-          echo "Dry run - checking cookie & IDs, not following"
-          echo "IDs in file: $(grep -c '^[0-9]' config/developer_ids.txt)"
-          cat config/developer_ids.txt | head -n 20
-          python3 -c "import os; [print(f\"{k}: {'set ('+str(len(os.environ.get(k,'')))+')' if os.environ.get(k,'') else 'empty'}\") for k in ['ROBLOSECURITY','ROBLOX_COOKIE','ROBLOSECURITY_1']]"
-          python3 -c "ids=[l.strip() for l in open('config/developer_ids.txt') if l.strip() and not l.strip().startswith('#')]; print(f\"IDs: {len(ids)}\")"
+          echo "Dry run for ${{ inputs.tracker }} (pool ${{ inputs.pool }})"
+          python follow.py --tracker ${{ inputs.tracker }} --dry-run --pool ${{ inputs.pool }} 2>&1 | head -n 100
+          echo "--- trackers.yaml ---"
+          cat config/trackers.yaml
 
-      - name: Follow all developer_ids.txt (102) with alt
+      - name: Follow (residential IP required - will 403 Challenge on datacenter)
         if: ${{ inputs.dry_run != 'true' }}
         env:
           ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
           ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
           ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
+          ROBLOSECURITY_2: ${{ secrets.ROBLOSECURITY_2 }}
+          ROBLOSECURITY_3: ${{ secrets.ROBLOSECURITY_3 }}
+          ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
+          ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
         run: |
-          echo "Following $(grep -c '^[0-9]' config/developer_ids.txt) IDs..."
-          cat config/developer_ids.txt | head -n 20
-          echo "---"
-          python follow_all.py
+          echo "Following ${{ inputs.tracker }} with pool ${{ inputs.pool }} - NOTE: must run from home IP or self-hosted residential runner"
+          echo "Datacenter (GitHub cloud) will 403 Challenge and fail - that is expected."
+          echo "Home run: python follow.py --tracker ${{ inputs.tracker }} --pool ${{ inputs.pool }}"
+          python follow.py --tracker ${{ inputs.tracker }} --pool ${{ inputs.pool }} 2>&1 | tail -n 200
 
       - name: Done
         if: always()
-        run: echo "Check logs above - 'Follow X -> OK' or 'already following'. Next 5-min tracker tick will show Hunt for those 2."
+        run: echo "Check logs: 'OK' / 'already'. Next 5-min trackers.yml tick will show Hunt."
 
       - name: Ping Discord on finish/fail
         if: always()
@@ -65,21 +84,12 @@ jobs:
           STATUS: ${{ job.status }}
         run: |
           if [ -z "$WEBHOOK" ]; then
-            echo "DISCORD_PING_WEBHOOK secret not set — skipping Discord ping. Add it at https://github.com/safelysound/roblox-scanner/settings/secrets/actions"
+            echo "DISCORD_PING_WEBHOOK not set - skipping"
             exit 0
           fi
           RUN_URL="https://github.com/safelysound/roblox-scanner/actions/runs/${{ github.run_id }}"
-          if [ "$STATUS" = "success" ]; then
-            EMOJI="✅"
-            MSG="Follow Devs finished **SUCCESS**"
-          else
-            EMOJI="❌"
-            MSG="Follow Devs finished **$STATUS**"
-          fi
-          CONTENT="<@475392041174564886> $EMOJI $MSG — ${{ github.workflow }} [Run #${{ github.run_number }}]($RUN_URL)"
-          # Escape for JSON
-          PAYLOAD=$(jq -n --arg c "$CONTENT" --arg url "$RUN_URL" '{content: $c, allowed_mentions: {parse: ["users"]}}')
-          curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK" -o /tmp/discord_resp.txt -w "%{http_code}"
-          echo ""
-          cat /tmp/discord_resp.txt
-          echo "Discord ping sent with status $STATUS"
+          if [ "$STATUS" = "success" ]; then EMOJI="✅"; MSG="Follow ${{ inputs.tracker }} finished SUCCESS"
+          else EMOJI="❌"; MSG="Follow ${{ inputs.tracker }} finished $STATUS"; fi
+          CONTENT="<@475392041174564886> $EMOJI $MSG — [Run #${{ github.run_number }}]($RUN_URL)"
+          PAYLOAD=$(jq -n --arg c "$CONTENT" '{content: $c, allowed_mentions: {parse: ["users"]}}')
+          curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK" -o /tmp/out.txt -w "%{http_code}"; echo ""; cat /tmp/out.txt

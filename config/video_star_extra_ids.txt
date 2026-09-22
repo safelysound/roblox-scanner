@@ -1,3 +1,0 @@
-# Video Star extra IDs — users to track in Video Star Tracker even if not in group 4199740
-# One per line, # comments. 1377033267 = skpm_plz (already in Admin 1200769, now added to Video+Developer)
-1377033267
