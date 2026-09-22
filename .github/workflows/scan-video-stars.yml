@@ -51,6 +51,10 @@ jobs:
           ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
           ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
           ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
+          ROBLOSECURITY_2: ${{ secrets.ROBLOSECURITY_2 }}
+          ROBLOSECURITY_3: ${{ secrets.ROBLOSECURITY_3 }}
+          ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
+          ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
         run: |
           echo "Running Video Star shard ${{ matrix.shard }} of 3 (Group 4199740)"
           MAX_ARGS=""
@@ -66,12 +70,19 @@ jobs:
             --verbose
           ls -lh shard_${{ matrix.shard }}.json
           cat shard_${{ matrix.shard }}.json | head -c 1000
+          # Extra Video Star IDs (1377033267) — track even if not in group 4199740 (uses developer_scanner + same Hunt logic)
+          if [ "${{ matrix.shard }}" = "0" ] && [ -f config/video_star_extra_ids.txt ]; then
+            echo "--- Extra Video Star IDs (config/video_star_extra_ids.txt) ---"; cat config/video_star_extra_ids.txt
+            python developer_scanner.py --user-ids-file config/video_star_extra_ids.txt --place-id "${{ inputs.place_id || '74205509034203' }}" --json shard_extra.json --verbose || echo "extra scan failed (non-fatal)"; ls -lh shard_extra.json 2>/dev/null || true; cat shard_extra.json 2>/dev/null | head -c 1000; echo
+          fi
 
       - name: Upload shard artifact
         uses: actions/upload-artifact@v4
         with:
           name: shard-video-${{ matrix.shard }}
-          path: shard_${{ matrix.shard }}.json
+          path: |
+            shard_${{ matrix.shard }}.json
+            shard_extra.json
           retention-days: 7
           if-no-files-found: error
 
@@ -108,7 +119,7 @@ jobs:
 
       - name: Merge shards
         run: |
-          SHARDS=$(find shards . -name "shard_*.json" 2>/dev/null | tr '\n' ' ')
+          SHARDS=$(find shards . -name "*.json" 2>/dev/null | tr '\n' ' ')
           echo "Found shards: $SHARDS"
           if [ -z "$SHARDS" ]; then
             echo "ERROR: No shard files found!"
