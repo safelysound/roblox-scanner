@@ -52,7 +52,20 @@ def _cookie_headers() -> Dict[str, str]:
 def _log_cookie_status():
     ck = _get_roblox_cookie()
     if ck:
-        print(f"Using ROBLOSECURITY cookie (len {len(ck)}, prefix {ck[:20]}...) — authenticated presence (Follow bypass)", file=sys.stderr)
+        # Log suffix too (masked) to detect truncation, and env source
+        src = next((k for k in ["ROBLOSECURITY", "ROBLOX_COOKIE", "ROBLOSECURITY_1"] if __import__("os").environ.get(k)), "unknown")
+        suf = ck[-20:] if len(ck)>=20 else ck
+        has_warn = "_|WARNING" in ck
+        has_pipe = ck.count("|")
+        print(f"Using {src} cookie len {len(ck)} prefix {ck[:20]!r} suffix {suf!r} warn={has_warn} pipes={has_pipe} — authenticated presence", file=sys.stderr)
+        # Quick validation via mobileapi (less challenged than users.roblox.com)
+        try:
+            import requests as _rq, sys as _sys
+            # Try mobileapi/userinfo which often returns auth even when users endpoint 9002s
+            r=_rq.get("https://www.roblox.com/mobileapi/userinfo", timeout=10, headers={"User-Agent":"Roblox/Android","Cookie": f".ROBLOSECURITY={ck}", "Referer":"https://www.roblox.com/"})
+            print(f"mobileapi check {r.status_code} body {r.text[:400]!r}", file=_sys.stderr)
+        except Exception as e:
+            print(f"mobileapi check error {e}", file=__import__("sys").stderr)
         return True
     else:
         print("No ROBLOSECURITY/ROBLOX_COOKIE found — unauthenticated presence (Offline-hidden devs will stay Offline)", file=sys.stderr)
@@ -71,7 +84,12 @@ def _get_my_id(headers):
             rh=s.get("https://www.roblox.com/home", timeout=10)
             auth_m = re.search(r'"isAuthenticated"\s*:\s*true', rh.text)
             uid_m = re.search(r'"userId"\s*:\s*(\d+)', rh.text)
-            print(f"home check status {rh.status_code} isAuth {bool(auth_m)} uid {uid_m.group(1) if uid_m else None} hasCookie {bool(ck)} len {len(rh.text)}", file=sys.stderr)
+            # Also check for generic logged-in markers
+            has_signout = "Sign Out" in rh.text or "Log Out" in rh.text
+            has_robux = "Robux" in rh.text
+            # find any alt ID in home
+            alt_in_home = "10218002102" in rh.text
+            print(f"home check status {rh.status_code} isAuth {bool(auth_m)} uid {uid_m.group(1) if uid_m else None} altInHome {alt_in_home} signout {has_signout} hasCookie {bool(ck)} len {len(rh.text)} snippet {rh.text[2000:2500]!r}", file=sys.stderr)
             if auth_m and uid_m:
                 return int(uid_m.group(1))
             # fallback check for alt id in home HTML
