@@ -69,19 +69,65 @@ def _get_my_id(headers):
     return None
 
 def _profile_shows_hunt(user_id, headers):
-    """Profile scraping fallback for hidden even when Following (e.g., 91512961, 92501615)."""
+    """Profile scraping fallback for hidden even when Following (e.g., 91512961, 92501615).
+    Tries multiple endpoints that the website uses to show Hunt when Following:
+    1. Profile HTML (contains Join button / game link when Following)
+    2. Presence with CSRF + Referer (profile's XHR uses CSRF)
+    3. Alternative: users.roblox.com presence
+    """
+    import requests as _req, re, sys, time
+    ck=headers.get("Cookie","")
+    # Try 1: Profile HTML with alt cookie - check for Hunt in embedded JSON or HTML
     try:
-        import requests as _req
-        ck=headers.get("Cookie","")
-        h2={"User-Agent":"Mozilla/5.0","Referer":"https://www.roblox.com/","Accept":"text/html","Cookie": ck}
+        h2={"User-Agent":"Mozilla/5.0","Referer":f"https://www.roblox.com/users/{user_id}/profile","Accept":"text/html,application/xhtml+xml","Cookie": ck}
         r=_req.get(f"https://www.roblox.com/users/{user_id}/profile", timeout=15, headers=h2)
-        if r.status_code!=200:
-            return False
-        t=r.text
-        return "74205509034203" in t or "The Hunt: Roblox 20" in t
+        if r.status_code==200:
+            t=r.text
+            # Check for Hunt placeId, universeId, or game name in various forms
+            if "74205509034203" in t or "10766456501" in t:
+                print(f"profile scrape {user_id}: found Hunt via place/universe in HTML", file=sys.stderr)
+                return True
+            if "The Hunt: Roblox 20" in t or "The Hunt Roblox 20" in t:
+                print(f"profile scrape {user_id}: found Hunt name in HTML", file=sys.stderr)
+                return True
+            # Check for Join button that appears when Following and in Hunt (game URL)
+            if "roblox.com/games/74205509034203" in t:
+                print(f"profile scrape {user_id}: found Hunt game link", file=sys.stderr)
+                return True
     except Exception as e:
-        print(f"profile scrape {user_id} error {e}", file=sys.stderr)
-        return False
+        print(f"profile scrape {user_id} HTML error {e}", file=sys.stderr)
+    # Try 2: Presence with CSRF (profile's XHR includes x-csrf-token)
+    try:
+        # Get CSRF
+        r2=_req.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"User-Agent":"Mozilla/5.0","Cookie": ck, "Referer":"https://www.roblox.com/"})
+        tok=r2.headers.get("x-csrf-token")
+        if tok:
+            h3={"User-Agent":"Mozilla/5.0","Content-Type":"application/json","Accept":"application/json","Referer":f"https://www.roblox.com/users/{user_id}/profile","Origin":"https://www.roblox.com","Cookie": ck, "x-csrf-token": tok}
+            r3=_req.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=h3)
+            if r3.status_code==200:
+                j=r3.json().get("userPresences",[{}])[0]
+                pid=j.get("placeId")
+                if pid and str(pid)=="74205509034203":
+                    print(f"profile scrape {user_id}: found Hunt via presence+CSRF", file=sys.stderr)
+                    return True
+                # Also check if presence now shows gameId/universe for Hunt
+                if j.get("universeId")==10766456501:
+                    print(f"profile scrape {user_id}: found Hunt via universe+CSRF", file=sys.stderr)
+                    return True
+    except Exception as e:
+        print(f"profile scrape {user_id} CSRF presence error {e}", file=sys.stderr)
+    # Try 3: Alternative presence endpoint that profile might use (users API)
+    try:
+        h4={"User-Agent":"Mozilla/5.0","Referer":f"https://www.roblox.com/users/{user_id}/profile","Accept":"application/json","Cookie": ck}
+        r4=_req.get(f"https://www.roblox.com/users/{user_id}/profile", timeout=10, headers=h4)
+        # Already tried, but try with JSON accept
+        h5={"User-Agent":"Mozilla/5.0","Accept":"application/json","Cookie": ck, "Referer": f"https://www.roblox.com/users/{user_id}/profile"}
+        r5=_req.get(f"https://users.roblox.com/v1/users/{user_id}", timeout=10, headers=h5)
+        # Not presence, skip
+        pass
+    except: pass
+    print(f"profile scrape {user_id}: no Hunt found", file=sys.stderr)
+    return False
 
 def _get_followings(my_id, headers):
     following=set()
@@ -170,6 +216,20 @@ def fetch_presences(user_ids: List[int]) -> Dict[int, Dict[str, Any]]:
     if not hasattr(fetch_presences, "_logged"):
         _log_cookie_status()
         fetch_presences._logged = True
+    # Get CSRF for authenticated presence (profile's XHR includes it, needed for Hunt to show when Following)
+    csrf_token=None
+    if "Cookie" in headers and headers.get("Cookie"):
+        try:
+            import requests as _req2
+            r_csrf=_req2.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"User-Agent":"Mozilla/5.0","Cookie": headers.get("Cookie",""), "Referer":"https://www.roblox.com/"})
+            csrf_token=r_csrf.headers.get("x-csrf-token")
+            if csrf_token:
+                headers["x-csrf-token"]=csrf_token
+                headers["Referer"]="https://www.roblox.com/"
+                headers["Origin"]="https://www.roblox.com"
+                print(f"presence CSRF {csrf_token[:8]}...", file=sys.stderr)
+        except Exception as e:
+            print(f"presence CSRF fetch failed {e}", file=sys.stderr)
     results={}
     for i in range(0, len(user_ids), PRESENCE_BATCH_SIZE):
         batch=user_ids[i:i+PRESENCE_BATCH_SIZE]
