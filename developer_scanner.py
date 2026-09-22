@@ -68,6 +68,21 @@ def _get_my_id(headers):
     except: pass
     return None
 
+def _profile_shows_hunt(user_id, headers):
+    """Profile scraping fallback for hidden even when Following (e.g., 91512961, 92501615)."""
+    try:
+        import requests as _req
+        ck=headers.get("Cookie","")
+        h2={"User-Agent":"Mozilla/5.0","Referer":"https://www.roblox.com/","Accept":"text/html","Cookie": ck}
+        r=_req.get(f"https://www.roblox.com/users/{user_id}/profile", timeout=15, headers=h2)
+        if r.status_code!=200:
+            return False
+        t=r.text
+        return "74205509034203" in t or "The Hunt: Roblox 20" in t
+    except Exception as e:
+        print(f"profile scrape {user_id} error {e}", file=sys.stderr)
+        return False
+
 def _get_followings(my_id, headers):
     following=set()
     if not my_id:
@@ -257,7 +272,26 @@ def main():
             elif place_id==args.place_id or root_place==args.place_id:
                 is_target=True
         # isFollowing flag for discord_updater to know if Hunt was revealed via Follow
-        is_following = uid in followings if 'followings' in locals() else False
+        is_following = uid in followings if followings else False
+        # Fallback per-user check if bulk followings empty (e.g., 9002 auth) — check single followings page for this uid
+        if not is_following and my_id and len(followings)==0 and ptype==2 and place_id is None:
+            try:
+                import requests as _req
+                ck2=headers_for_follow.get("Cookie","")
+                h2={"User-Agent":"Mozilla/5.0","Referer":"https://www.roblox.com/","Accept":"application/json","Cookie": ck2}
+                r=_req.get(f"https://friends.roblox.com/v1/users/{my_id}/followings?limit=100&sortOrder=Asc", timeout=10, headers=h2)
+                if r.status_code==200 and any(e.get("id")==uid for e in r.json().get("data",[])):
+                    is_following=True
+                    print(f"per-user isFollowing true for {uid}", file=sys.stderr)
+            except: pass
+        # Profile scraping fallback for hidden even when Following (e.g., 91512961, 92501615) — website shows Hunt even when presence hides
+        if ptype==2 and place_id is None and root_place is None and univ is None and is_following:
+            if _profile_shows_hunt(uid, headers_for_follow):
+                print(f"profile scrape: {uid} shows Hunt via profile (hidden presence but Following reveals Hunt)", file=sys.stderr)
+                place_id=74205509034203
+                root_place=74205509034203
+                univ=10766456501
+                last_loc="The Hunt: Roblox 20"
         enriched={**m, "presenceType": ptype, "presenceTypeName": {0:"Offline",1:"Online",2:"InGame",3:"InStudio"}.get(ptype,str(ptype)), "lastLocation": last_loc, "placeId": place_id, "rootPlaceId": root_place, "universeId": univ, "gameId": pres.get("gameId"), "lastOnline": pres.get("lastOnline"), "isFollowing": is_following, "presence_raw": pres}
         if is_target:
             target.append(enriched)
