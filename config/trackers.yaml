@@ -1,0 +1,36 @@
+# Single source of truth — add a tracker here, workflow picks it up automatically
+# No workflow edit needed. Colors are hex, webhook is secrets name.
+
+trackers:
+  - id: admin
+    name: Admin Tracker
+    groupId: 1200769
+    color: "#305778"  # 3168504 decimal
+    emoji: "<:roblox:1551329066337050754>"
+    webhookSecret: DISCORD_WEBHOOK
+    messageIdFile: discord_message_id.txt
+    repoMessageId: .github/discord_message_id.txt
+
+  - id: video-stars
+    name: Video Star Tracker
+    groupId: 4199740
+    extraIds: [1377033267]  # skpm_plz — also in Admin, now mirrored here
+    # alternatively extraIdsFile: config/video_star_extra_ids.txt
+    color: "#F9E999"
+    emoji: "<:verified:1551329029783691334>"
+    webhookSecret: DISCORD_WEBHOOK_VIDEO_STARS
+    messageIdFile: discord_message_id_video_stars.txt
+    repoMessageId: .github/discord_message_id_video_stars.txt
+
+  - id: developers
+    name: Developer Tracker
+    idsFile: config/developer_ids.txt  # 103 IDs
+    color: "#000000"
+    emoji: "<:developer:1551388816324169838>"
+    webhookSecret: DISCORD_WEBHOOK_DEVELOPERS
+    messageIdFile: discord_message_id_developers.txt
+    repoMessageId: .github/discord_message_id_developers.txt
+
+settings:
+  targetPlaceId: 74205509034203
+  targetUniverseId: 10766456501
