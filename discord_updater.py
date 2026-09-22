@@ -8,7 +8,7 @@ Discord webhook auto-editing updater for Roblox Group Scanner.
     - <emoji> [DisplayName (@Username)](https://www.roblox.com/users/ID/profile)
       - Playing: [Game Name](https://www.roblox.com/games/PLACEID/Game-Name)
     - ... (Hunt first, then Unknown)
-    - Playing: **Unknown** - (Must Follow/Game Status Hidden) if hidden
+    - Playing: [The Hunt: Roblox 20](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20) (Must Follow to Join) if hidden (requires follow to see)
     -# Last updated: <t:UNIX:R>
 
 - Filters: excludes anyone confirmed NOT playing Hunt — only Hunt + Unknown remain
@@ -112,7 +112,7 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
             safe_game = game_name.replace("[", "\\[").replace("]", "\\]")
             playing = f"[{safe_game}]({game_url})"
         else:
-            playing = "**Unknown** - (Must Follow/Game Status Hidden)"
+            playing = f"[The Hunt: Roblox 20]({TARGET_GAME_URL}) (Must Follow to Join)"
 
         line = f"- {emoji} [{display} (@{username})]({profile})\n  - Playing: {playing}"
         lines.append(line)
