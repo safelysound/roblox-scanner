@@ -6,12 +6,19 @@ Discord webhook auto-editing updater for Roblox Group Scanner.
   Title: <title>, Color: <color>
   Description:
     - <emoji> [DisplayName (@Username)](https://www.roblox.com/users/ID/profile)
-      - Playing: [Game Name](https://www.roblox.com/games/PLACEID/Game-Name)
-    - ... (Hunt first, then Unknown)
-    - Playing: **Unknown** - (Must Follow/Game Status Hidden) if hidden
+      - Playing: [The Hunt: Roblox 20](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20) (Must Follow to Join)  [if InGame Hunt via Follow]
+      - Playing: [The Hunt Roblox 20](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20) (Appearing Offline - Must Follow to Join)  [if Offline Hunt via Follow]
+      - Playing: [The Hunt: Roblox 20](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20)  [if InGame Hunt public, no Follow needed]
+      - Playing: **Unknown** (Must Follow/Game Status Hidden)  [if InGame hidden NOT Following, only if playing but not visible]
+    - Only Hunt (via Follow or public) + hidden InGame Unknown are shown; all else filtered per spec 2026-09-22:
+      * Online(1)/InStudio(3)/missing/null -> Do not show
+      * InGame hidden even when Following -> Do not show (e.g., 92501615)
+      * InGame hidden NOT Following -> Unknown (Must Follow/Game Status Hidden)
+      * InGame non-Hunt visible -> Do not show
+      * Offline -> Do not show except Offline Hunt via Follow
     -# Last updated: <t:UNIX:R>
 
-- Filters: excludes anyone confirmed NOT playing Hunt — only Hunt + Unknown remain
+- Filters: ONLY Hunt visible via Following; everything else hidden
 - Pagination: if description >4000 chars, splits into 2+ embeds (up to 10), each title/color. Auto-reverts to 1 when fits. Total 6000.
 - First run: POST ?wait=true -> gets message_id, saves to file
 - Next runs: PATCH /messages/{id} to edit same message
@@ -72,17 +79,43 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
     target = data.get("target_game_players", [])
     other = data.get("other_game_players", [])
 
-    # Filter: exclude confirmed NOT playing Hunt — Keep Hunt + Unknown
+    # Filter per final spec 2026-09-22 + 2026-09-22 clarification:
+    # - Online(1), InStudio(3), missing/null -> Do not show (exclude)
+    # - InGame hidden even when Following (isFollowing true, no placeId) -> Do not show
+    # - InGame hidden NOT Following (isFollowing false, no placeId, presenceType 2) -> Keep as Unknown (Must Follow/Game Status Hidden)
+    # - InGame Hunt visible (public, no Follow needed) -> Keep as plain Hunt link
+    # - InGame Hunt visible when Following -> Keep as Must Follow to Join
+    # - InGame non-Hunt visible -> Do not show
+    # - Offline (0) -> Do not show, except Offline Hunt visible when Following -> Keep as Appearing Offline
+    # - Offline non-Hunt visible -> Do not show
     filtered = []
     for u in target + other:
         pid = u.get("placeId") or u.get("rootPlaceId")
-        uid = u.get("universeId")
+        ptype = u.get("presenceType")
+        try:
+            ptype_int = int(ptype) if ptype is not None else None
+        except:
+            ptype_int = None
+        is_following = bool(u.get("isFollowing"))
+        # Exclude Online, InStudio, missing/null per clarification
+        if ptype_int in (1, 3) or ptype_int is None:
+            continue
+        # Hunt visible -> keep (both public and follow-required)
         if pid is not None and str(pid) == TARGET_PLACE_ID:
             filtered.append(u)
-        elif pid is None and uid is None:
-            filtered.append(u)
-        else:
             continue
+        # Hidden InGame cases
+        if ptype_int == 2 and pid is None and u.get("universeId") is None:
+            if is_following:
+                # InGame hidden even when Following (e.g., 92501615) -> Do not show
+                continue
+            else:
+                # InGame hidden NOT Following -> Keep as Unknown (Must Follow/Game Status Hidden) only if playing a game but not visible
+                # This matches "ONLY IF their status shows them playing a game but the game isn't already visible"
+                filtered.append(u)
+                continue
+        # All other Offline / hidden -> Do not show
+        continue
 
     now = int(time.time())
     footer = f"-# Last updated: <t:{now}:R>"
@@ -108,11 +141,32 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
         effective_place = place_id or root_place
         game_name, game_url = get_game_link(effective_place, universe_id, last_loc)
 
-        if game_name and game_url:
-            safe_game = game_name.replace("[", "\\[").replace("]", "\\]")
-            playing = f"[{safe_game}]({game_url})"
+        # Only Hunt is shown — per spec, determine label by presenceType
+        # - InGame Hunt via Follow (isFollowing true) -> Must Follow to Join with colon
+        # - Offline Hunt via Follow -> Appearing Offline - Must Follow to Join (no colon)
+        # - InGame Hunt public (isFollowing false) -> plain Hunt link
+        # - InGame hidden NOT Following -> Unknown (Must Follow/Game Status Hidden)
+        pid_check = u.get("placeId") or u.get("rootPlaceId")
+        is_following = bool(u.get("isFollowing"))
+        ptype = u.get("presenceType")
+        try:
+            ptype_int = int(ptype) if ptype is not None else None
+        except:
+            ptype_int = None
+
+        if pid_check is not None and str(pid_check) == TARGET_PLACE_ID:
+            if ptype_int == 0:
+                # Offline but Hunt shown via Following = Appearing Offline (no colon per spec)
+                playing = f"[The Hunt Roblox 20]({TARGET_GAME_URL}) (Appearing Offline - Must Follow to Join)"
+            elif is_following:
+                # InGame Hunt visible when Following (requires Follow to see) -> Must Follow to Join with colon
+                playing = f"[The Hunt: Roblox 20]({TARGET_GAME_URL}) (Must Follow to Join)"
+            else:
+                # InGame Hunt shown without being follow-checked (public) -> plain Hunt link per clarification
+                playing = f"[The Hunt: Roblox 20]({TARGET_GAME_URL})"
         else:
-            playing = "**Unknown** - (Must Follow/Game Status Hidden)"
+            # Hidden InGame NOT Following -> Unknown (Must Follow/Game Status Hidden) only if playing but not visible
+            playing = "**Unknown** (Must Follow/Game Status Hidden)"
 
         line = f"- {emoji} [{display} (@{username})]({profile})\n  - Playing: {playing}"
         lines.append(line)
