@@ -11,8 +11,9 @@ on:
         description: 'Target PlaceId'
         required: false
         default: '74205509034203'
-  schedule:
-    - cron: '*/5 * * * *'
+  # schedule disabled on test branch - manual only
+  # schedule:
+  #   - cron: '*/5 * * * *'
 
 concurrency:
   group: developer-scan
@@ -144,10 +145,10 @@ jobs:
       - name: Discord webhook (Developer Tracker)
         if: always()
         env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_DEVELOPERS }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_DEVELOPERS_TEST }}
         run: |
           if [ -z "$DISCORD_WEBHOOK" ]; then
-            echo "No DISCORD_WEBHOOK_DEVELOPERS secret set - skipping"
+            echo "No DISCORD_WEBHOOK_DEVELOPERS_TEST secret set - skipping"
             exit 0
           fi
           if [ -f .github/discord_message_id_developers.txt ]; then
