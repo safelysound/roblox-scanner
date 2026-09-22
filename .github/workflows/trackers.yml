@@ -49,7 +49,7 @@ jobs:
         run: pip install requests pyyaml tqdm
 
       - name: Run ${{ matrix.tracker }} shard ${{ matrix.shard }}/3
-        if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
         env:
           ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
           ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
@@ -69,7 +69,7 @@ jobs:
           cat shard_${{ matrix.tracker }}_${{ matrix.shard }}.json | head -c 2000; echo
 
       - name: Upload shard artifact
-        if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
         uses: actions/upload-artifact@v4
         with:
           name: shard-${{ matrix.tracker }}-${{ matrix.shard }}
@@ -103,7 +103,7 @@ jobs:
         run: pip install requests pyyaml
 
       - name: Download shards for ${{ matrix.tracker }}
-        if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
         uses: actions/download-artifact@v4
         with:
           pattern: shard-${{ matrix.tracker }}-*
@@ -111,13 +111,13 @@ jobs:
           path: shards
 
       - name: Debug shards
-        if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
         run: |
           ls -R | head -n 100
           ls -lh shards/ || echo "no shards"
 
       - name: Merge ${{ matrix.tracker }}
-        if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
         run: |
           SHARDS=$(find shards . -name "shard_${{ matrix.tracker }}_*.json" 2>/dev/null | tr '\n' ' ')
           echo "Found shards: $SHARDS"
@@ -135,7 +135,7 @@ jobs:
           python -m json.tool $OUT_JSON | head -n 150
 
       - name: Upload final ${{ matrix.tracker }}
-        if: ${{ inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
         uses: actions/upload-artifact@v4
         with:
           name: final-results-${{ matrix.tracker }}
@@ -146,7 +146,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Restore Discord message ID - admin
-        if: ${{ (inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'admin' }}
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'admin' }}
         uses: actions/cache@v4
         with:
           path: discord_message_id.txt
@@ -155,7 +155,7 @@ jobs:
             discord-message-id-admin
 
       - name: Restore Discord message ID - video-stars
-        if: ${{ (inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'video-stars' }}
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'video-stars' }}
         uses: actions/cache@v4
         with:
           path: discord_message_id_video_stars.txt
@@ -164,7 +164,7 @@ jobs:
             discord-message-id-video-stars
 
       - name: Restore Discord message ID - developers
-        if: ${{ (inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'developers' }}
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'developers' }}
         uses: actions/cache@v4
         with:
           path: discord_message_id_developers.txt
@@ -173,7 +173,7 @@ jobs:
             discord-message-id-developers
 
       - name: Discord webhook for ${{ matrix.tracker }}
-        if: always() && (inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker)
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker)
         env:
           TRACKER: ${{ matrix.tracker }}
           DISCORD_WEBHOOK_ADMIN: ${{ secrets.DISCORD_WEBHOOK }}
@@ -197,7 +197,7 @@ jobs:
           python discord_updater.py "$FILE" --title "$TITLE" --color "$COLOR" --emoji "$EMOJI" --dry-run | head -n 100
 
       - name: Save Discord message ID - admin
-        if: ${{ (inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'admin' }}
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'admin' }}
         uses: actions/cache/save@v4
         with:
           path: discord_message_id.txt
@@ -205,7 +205,7 @@ jobs:
         continue-on-error: true
 
       - name: Save Discord message ID - video-stars
-        if: ${{ (inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'video-stars' }}
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'video-stars' }}
         uses: actions/cache/save@v4
         with:
           path: discord_message_id_video_stars.txt
@@ -213,7 +213,7 @@ jobs:
         continue-on-error: true
 
       - name: Save Discord message ID - developers
-        if: ${{ (inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'developers' }}
+        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'developers' }}
         uses: actions/cache/save@v4
         with:
           path: discord_message_id_developers.txt
@@ -221,7 +221,7 @@ jobs:
         continue-on-error: true
 
       - name: Persist Discord message ID to repo
-        if: always() && (inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker)
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker)
         run: |
           case "${{ matrix.tracker }}" in
             admin) MSG_FILE="discord_message_id.txt"; REPO_FILE=".github/discord_message_id.txt";;
