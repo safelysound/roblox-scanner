@@ -25,6 +25,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: trackers-workflow
+  cancel-in-progress: false
+
 jobs:
   scan:
     runs-on: ubuntu-latest
