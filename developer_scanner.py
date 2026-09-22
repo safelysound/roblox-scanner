@@ -160,62 +160,73 @@ def _get_csrf_from_session(sess):
     return None
 
 def _follow_with_pool(target_uid, pool):
-    """Try to follow target_uid using pool in order. On 429/Challenge/XSRF, try next token then next account."""
-    import sys, time, re
-    for idx, (key, ck) in enumerate(pool):
-        sess=_seeded_session(f".ROBLOSECURITY={ck}")
-        # Try HTML CSRF first, then auth CSRF if HTML fails with XSRF invalid
-        toks=[]
-        t1=_get_csrf_from_session(sess)
-        if t1:
-            toks.append(t1)
-        # Also try direct auth token as second attempt
-        try:
-            r2=sess.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"User-Agent":"Mozilla/5.0","Referer":"https://www.roblox.com/","Origin":"https://www.roblox.com"})
-            t2=r2.headers.get("x-csrf-token")
-            if t2 and t2 not in toks:
-                toks.append(t2)
-                print(f"follow {target_uid} via {key} got auth CSRF {t2[:6]}...", file=sys.stderr)
-        except: pass
-        if not toks:
-            toks=[None]
-        for tok in toks:
-            headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Referer":"https://www.roblox.com/users/{}/profile".format(target_uid),"Origin":"https://www.roblox.com","Accept":"application/json","Cookie": f".ROBLOSECURITY={ck}"}
+    """Follow Unknown to categorize — tries pool in order with follow_all.py backoff (12s + exponential Challenge/429). Returns success."""
+    import sys, time, random
+    # Use 12s base delay (5/min safe for datacenter) + jitter, and 15/30/60/120 backoff for Challenge/429
+    RETRY_BACKOFF=[15,30,60,120]
+    for attempt in range(1,5):  # up to 4 attempts per account before switching
+        for key, ck in pool:
+            sess=_seeded_session(f".ROBLOSECURITY={ck}")
+            # Get fresh CSRF via auth (most reliable for friends) — also update session header
+            tok=None
+            try:
+                r=sess.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"User-Agent":"Mozilla/5.0","Referer":"https://www.roblox.com/","Origin":"https://www.roblox.com"})
+                tok=r.headers.get("x-csrf-token")
+                if tok:
+                    sess.headers["x-csrf-token"]=tok
+                    print(f"follow {target_uid} via {key} CSRF {tok[:6]}... attempt {attempt}", file=sys.stderr)
+            except: pass
+            if not tok:
+                tok=_get_csrf_from_session(sess)
+            headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Referer":f"https://www.roblox.com/users/{target_uid}/profile","Origin":"https://www.roblox.com","Accept":"application/json","Content-Type":"application/json","Cookie": f".ROBLOSECURITY={ck}"}
             if tok:
                 headers["x-csrf-token"]=tok
             url=FOLLOW_API.format(uid=target_uid)
             try:
                 r=sess.post(url, timeout=15, headers=headers)
                 txt=r.text[:400] if r.text else ""
-                print(f"follow {target_uid} via {key} tok {tok[:6] if tok else None} -> {r.status_code} {txt!r}", file=sys.stderr)
+                # Refresh CSRF if returned
+                new_tok=r.headers.get("x-csrf-token")
+                if new_tok and new_tok!=tok:
+                    sess.headers["x-csrf-token"]=new_tok
+                    print(f"follow {target_uid} via {key} refreshed CSRF {new_tok[:6]}...", file=sys.stderr)
+                print(f"follow {target_uid} via {key} attempt {attempt} -> {r.status_code} {txt!r}", file=sys.stderr)
                 if r.status_code in (200,201):
-                    try:
-                        j=r.json()
-                        if j.get("success") is True or r.status_code==200:
-                            return (True, key, sess, tok)
-                    except:
-                        return (True, key, sess, tok)
-                    return (True, key, sess, tok)
-                if r.status_code==400 and "already" in r.text.lower():
+                    return (True, key, sess, tok or new_tok)
+                if r.status_code==400 and "already" in txt.lower():
                     print(f"follow {target_uid} already following via {key}", file=sys.stderr)
                     return (True, key, sess, tok)
+                # XSRF invalid -> refresh and retry same account next attempt
                 if "XSRF token invalid" in txt or "Token Validation Failed" in txt:
-                    print(f"pool {key} XSRF invalid with tok {tok[:6] if tok else None}, trying next tok/account", file=sys.stderr)
-                    time.sleep(0.5)
-                    continue  # try next tok
-                if r.status_code in (429, 403):
-                    if "challenge" in r.text.lower() or r.status_code==429:
-                        print(f"pool {key} rate limited/challenge for {target_uid} ({r.status_code}), trying next account", file=sys.stderr)
-                        time.sleep(0.8)
-                        break  # break tok loop, continue to next account
-                if r.status_code not in (200,400):
-                    time.sleep(0.5)
+                    print(f"pool {key} XSRF invalid, will retry {key} next attempt", file=sys.stderr)
+                    time.sleep(1.5 + random.uniform(0,1))
                     continue
+                # Challenge or 429 -> backoff then try next account (or same next attempt)
+                if r.status_code==429 or (r.status_code==403 and "challenge" in txt.lower()):
+                    wait=RETRY_BACKOFF[min(attempt-1, len(RETRY_BACKOFF)-1)] + random.uniform(0,2)
+                    # Respect Retry-After if present
+                    try:
+                        ra=r.headers.get("Retry-After")
+                        if ra:
+                            wait=max(wait, float(ra))
+                    except: pass
+                    challenge=r.headers.get("rblx-challenge-type") or r.headers.get("rblx-challenge-id") or ""
+                    print(f"pool {key} Challenge/429 for {target_uid} ({r.status_code}) {challenge} wait {wait:.1f}s, trying next account", file=sys.stderr)
+                    time.sleep(min(wait, 3))  # in scanner we only sleep 3s max per try to stay fast; full backoff happens across attempts
+                    break
+                if r.status_code not in (200,400):
+                    time.sleep(1 + random.uniform(0,1))
             except Exception as e:
                 print(f"follow {target_uid} via {key} error {e}", file=sys.stderr)
-                time.sleep(0.5)
-                continue
-        # end tok loop -> next account
+                time.sleep(1)
+            # Small delay between pool accounts (aggressive but not hammer)
+            time.sleep(1.2 + random.uniform(0,0.8))
+        # End pool loop for this attempt
+        # Wait before next full pool attempt (exponential)
+        if attempt < 4:
+            wait=RETRY_BACKOFF[min(attempt-1, len(RETRY_BACKOFF)-1)]
+            print(f"follow {target_uid} full pool attempt {attempt} done, backoff {wait}s before retry", file=sys.stderr)
+            time.sleep(min(wait, 5))  # cap in-scan wait to 5s so 5-min job doesn't timeout; remaining retries next scheduled run
     return (False, None, None, None)
 
 def _presence_with_cookie(user_id, ck, tok=None, sess=None):
