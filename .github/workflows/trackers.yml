@@ -1,53 +1,106 @@
-name: Trackers (Admin / Video Stars / Developers) - unified
+name: Trackers (Admin / Video Stars / Developers)
+
+# Triggered every ~5 min by an external cron via workflow_dispatch, and on pushes to main
+# (e.g. after editing config/developer_ids.txt). The job matrix is built from config/trackers.yaml.
 
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.github/discord_message_id*.txt'
   workflow_dispatch:
     inputs:
       tracker:
-        description: 'Which tracker to run (admin, video-stars, developers, all)'
+        description: 'Which tracker to run'
         required: false
         default: 'all'
         type: choice
         options: ['all', 'admin', 'video-stars', 'developers']
       place_id:
-        description: 'Target PlaceId'
+        description: 'Target PlaceId (empty = settings.targetPlaceId from config/trackers.yaml)'
         required: false
-        default: '74205509034203'
+        default: ''
       max_members:
         description: 'Limit members for testing (empty = all)'
         required: false
         default: ''
+
+# Least privilege by default; only the merge job needs to push (Discord message-id commits).
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  scan:
+  # ---------------------------------------------------------------------------
+  # Build the matrices from config/trackers.yaml (only the selected trackers).
+  # ---------------------------------------------------------------------------
+  plan:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      trackers: ${{ steps.plan.outputs.trackers }}
+      scan: ${{ steps.plan.outputs.scan }}
+      place_id: ${{ steps.plan.outputs.place_id }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Plan
+        id: plan
+        env:
+          SELECTED: ${{ inputs.tracker }}
+          INPUT_PLACE_ID: ${{ inputs.place_id }}
+        run: |
+          ALL=$(yq -o=json -I=0 '.trackers' config/trackers.yaml)
+          if [ -n "$SELECTED" ] && [ "$SELECTED" != "all" ]; then
+            TRACKERS=$(jq -c --arg s "$SELECTED" '[.[] | select(.id == $s)]' <<< "$ALL")
+          else
+            TRACKERS="$ALL"
+          fi
+          if [ "$(jq length <<< "$TRACKERS")" -eq 0 ]; then
+            echo "::error::No tracker matches '$SELECTED' in config/trackers.yaml"
+            exit 1
+          fi
+          # One scan job per (tracker, shard)
+          SCAN=$(jq -c '[.[] | . as $t | ($t.shards // 1) as $n | range(0; $n) as $s | {id: $t.id, shard: $s, shards: $n}]' <<< "$TRACKERS")
+          PLACE_ID="${INPUT_PLACE_ID:-$(yq '.settings.targetPlaceId' config/trackers.yaml)}"
+          {
+            echo "trackers=$TRACKERS"
+            echo "scan=$SCAN"
+            echo "place_id=$PLACE_ID"
+          } >> "$GITHUB_OUTPUT"
+          echo "Trackers: $(jq -r 'map(.id) | join(", ")' <<< "$TRACKERS") | scan jobs: $(jq length <<< "$SCAN") | place: $PLACE_ID"
+
+  # ---------------------------------------------------------------------------
+  # Scan: one job per tracker shard.
+  # ---------------------------------------------------------------------------
+  scan:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     concurrency:
-      group: trackers-scan-${{ matrix.tracker }}-${{ matrix.shard }}
+      group: trackers-scan-${{ matrix.id }}-${{ matrix.shard }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
-        tracker: [admin, video-stars, developers]
-        shard: [0, 1, 2]
+        include: ${{ fromJSON(needs.plan.outputs.scan) }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+          cache: pip
 
-      - name: Install deps
-        run: pip install requests pyyaml tqdm
+      - run: pip install -r requirements.txt
 
-      - name: Run ${{ matrix.tracker }} shard ${{ matrix.shard }}/3
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
+      - name: Scan ${{ matrix.id }} (shard ${{ matrix.shard }}/${{ matrix.shards }})
         env:
+          TRACKER: ${{ matrix.id }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ matrix.shards }}
+          PLACE_ID: ${{ needs.plan.outputs.place_id }}
+          MAX_MEMBERS: ${{ inputs.max_members }}
           ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
           ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
           ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
@@ -56,216 +109,161 @@ jobs:
           ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
           ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
         run: |
-          echo "Tracker ${{ matrix.tracker }} shard ${{ matrix.shard }}/3"
-          MAX_ARGS=""
-          if [ -n "${{ inputs.max_members }}" ]; then
-            MAX_ARGS="--max-members ${{ inputs.max_members }}"
-          fi
-          python tracker_scanner.py --tracker ${{ matrix.tracker }} --place-id "${{ inputs.place_id || '74205509034203' }}" --shard ${{ matrix.shard }} --shards 3 --json shard_${{ matrix.tracker }}_${{ matrix.shard }}.json --verbose $MAX_ARGS
-          ls -lh shard_${{ matrix.tracker }}_${{ matrix.shard }}.json
-          cat shard_${{ matrix.tracker }}_${{ matrix.shard }}.json | head -c 2000; echo
+          ARGS=()
+          if [ -n "$MAX_MEMBERS" ]; then ARGS+=(--max-members "$MAX_MEMBERS"); fi
+          OUT="shard_${TRACKER}_${SHARD}.json"
+          python tracker_scanner.py --tracker "$TRACKER" --place-id "$PLACE_ID" \
+            --shard "$SHARD" --shards "$SHARDS" --json "$OUT" --verbose "${ARGS[@]}"
+          ls -lh "$OUT"
 
-      - name: Upload shard artifact
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
-        uses: actions/upload-artifact@v4
+      - name: Upload shard
+        uses: actions/upload-artifact@v7
         with:
-          name: shard-${{ matrix.tracker }}-${{ matrix.shard }}
-          path: shard_${{ matrix.tracker }}_${{ matrix.shard }}.json
-          retention-days: 7
+          name: shard-${{ matrix.id }}-${{ matrix.shard }}
+          path: shard_${{ matrix.id }}_${{ matrix.shard }}.json
+          retention-days: 1
           if-no-files-found: error
 
+  # ---------------------------------------------------------------------------
+  # Merge shards, update the Discord embed, remember the message id.
+  # ---------------------------------------------------------------------------
   merge:
-    needs: scan
+    needs: [plan, scan]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
-    if: always()
+    timeout-minutes: 10
+    permissions:
+      contents: write
     concurrency:
-      group: trackers-merge-${{ matrix.tracker }}
+      group: trackers-merge-${{ matrix.id }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
-        tracker: [admin, video-stars, developers]
+        include: ${{ fromJSON(needs.plan.outputs.trackers) }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+          cache: pip
 
-      - name: Install deps
-        run: pip install requests pyyaml
+      - run: pip install -r requirements.txt
 
-      - name: Download shards for ${{ matrix.tracker }}
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
-        uses: actions/download-artifact@v4
+      - name: Download shards
+        uses: actions/download-artifact@v8
+        continue-on-error: true
         with:
-          pattern: shard-${{ matrix.tracker }}-*
+          pattern: shard-${{ matrix.id }}-*
           merge-multiple: true
           path: shards
 
-      - name: Debug shards
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
+      - name: Merge shards
+        env:
+          ID: ${{ matrix.id }}
+          EXPECTED: ${{ matrix.shards || 1 }}
+          RESULTS: ${{ matrix.resultsFile }}
         run: |
-          ls -R | head -n 100
-          ls -lh shards/ || echo "no shards"
-
-      - name: Merge ${{ matrix.tracker }}
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
-        run: |
-          SHARDS=$(find shards . -name "shard_${{ matrix.tracker }}_*.json" 2>/dev/null | tr '\n' ' ')
-          echo "Found shards: $SHARDS"
-          if [ -z "$SHARDS" ]; then
-            echo "No shards for ${{ matrix.tracker }}, skipping"
+          FOUND=$(find shards -name "shard_${ID}_*.json" 2>/dev/null | wc -l)
+          if [ "$FOUND" -lt "$EXPECTED" ]; then
+            # A partial merge would drop the missing shard's members from the embed, so keep the previous embed instead.
+            echo "::warning::$ID: only $FOUND/$EXPECTED shards available - skipping merge and Discord update this run"
             exit 0
           fi
-          case "${{ matrix.tracker }}" in
-            admin) OUT_JSON="roblox_scan_results.json"; OUT_CSV="roblox_scan_results.csv";;
-            video-stars) OUT_JSON="roblox_scan_results_video.json"; OUT_CSV="roblox_scan_results_video.csv";;
-            developers) OUT_JSON="roblox_scan_results_developers.json"; OUT_CSV="roblox_scan_results_developers.csv";;
-          esac
-          python merge_shards.py $SHARDS --json $OUT_JSON --csv $OUT_CSV
-          ls -lh $OUT_JSON $OUT_CSV
-          python -m json.tool $OUT_JSON | head -n 150
+          python merge_shards.py shards/shard_"${ID}"_*.json --json "$RESULTS"
 
-      - name: Upload final ${{ matrix.tracker }}
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
-        uses: actions/upload-artifact@v4
+      - name: Upload merged results
+        uses: actions/upload-artifact@v7
         with:
-          name: final-results-${{ matrix.tracker }}
-          path: |
-            roblox_scan_results*.json
-            roblox_scan_results*.csv
-          retention-days: 30
-          if-no-files-found: warn
+          name: final-results-${{ matrix.id }}
+          path: ${{ matrix.resultsFile }}
+          retention-days: 1
+          if-no-files-found: ignore
 
-      - name: Restore Discord message ID - admin
-        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'admin' }}
-        uses: actions/cache@v4
-        with:
-          path: discord_message_id.txt
-          key: discord-message-id-admin
-          restore-keys: |
-            discord-message-id-admin
-
-      - name: Restore Discord message ID - video-stars
-        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'video-stars' }}
-        uses: actions/cache@v4
-        with:
-          path: discord_message_id_video_stars.txt
-          key: discord-message-id-video-stars
-          restore-keys: |
-            discord-message-id-video-stars
-
-      - name: Restore Discord message ID - developers
-        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'developers' }}
-        uses: actions/cache@v4
-        with:
-          path: discord_message_id_developers.txt
-          key: discord-message-id-developers
-          restore-keys: |
-            discord-message-id-developers
-
-      - name: Discord webhook for ${{ matrix.tracker }}
-        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker)
+      - name: Update Discord embed
         env:
-          TRACKER: ${{ matrix.tracker }}
-          DISCORD_WEBHOOK_ADMIN: ${{ secrets.DISCORD_WEBHOOK }}
-          DISCORD_WEBHOOK_VIDEO: ${{ secrets.DISCORD_WEBHOOK_VIDEO_STARS }}
-          DISCORD_WEBHOOK_DEVS: ${{ secrets.DISCORD_WEBHOOK_DEVELOPERS }}
+          WEBHOOK: ${{ secrets[matrix.webhookSecret] }}
+          RESULTS: ${{ matrix.resultsFile }}
+          MSG_FILE: ${{ matrix.messageIdFile }}
+          TITLE: ${{ matrix.name }}
+          COLOR: ${{ matrix.color }}
+          EMOJI: ${{ matrix.emoji }}
+          SECRET_NAME: ${{ matrix.webhookSecret }}
         run: |
-          case "$TRACKER" in
-            admin) FILE="roblox_scan_results.json"; TITLE="Admin Tracker"; COLOR="#305778"; EMOJI="<:roblox:1551329066337050754>"; MSG_FILE="discord_message_id.txt"; REPO_FILE=".github/discord_message_id.txt"; WEBHOOK="$DISCORD_WEBHOOK_ADMIN";;
-            video-stars) FILE="roblox_scan_results_video.json"; TITLE="Video Star Tracker"; COLOR="#F9E999"; EMOJI="<:verified:1551329029783691334>"; MSG_FILE="discord_message_id_video_stars.txt"; REPO_FILE=".github/discord_message_id_video_stars.txt"; WEBHOOK="$DISCORD_WEBHOOK_VIDEO";;
-            developers) FILE="roblox_scan_results_developers.json"; TITLE="Developer Tracker"; COLOR="#000000"; EMOJI="<:developer:1551388816324169838>"; MSG_FILE="discord_message_id_developers.txt"; REPO_FILE=".github/discord_message_id_developers.txt"; WEBHOOK="$DISCORD_WEBHOOK_DEVS";;
-          esac
-          if [ ! -f "$FILE" ]; then echo "No $FILE, skipping discord"; exit 0; fi
-          if [ -z "$WEBHOOK" ]; then echo "No webhook secret for $TRACKER, skipping"; exit 0; fi
-          if [ -f "$REPO_FILE" ]; then
-            echo "Restoring from $REPO_FILE"
-            cp "$REPO_FILE" "$MSG_FILE"
+          if [ ! -f "$RESULTS" ]; then
+            echo "::warning::No merged results for $TITLE, leaving the previous embed in place"
+            exit 0
           fi
-          echo "Posting $TITLE $COLOR $EMOJI"
-          python discord_updater.py "$FILE" --webhook "$WEBHOOK" --message-id-file "$MSG_FILE" --title "$TITLE" --color "$COLOR" --emoji "$EMOJI" 2>&1 | head -n 150
-          echo "--- Embed preview ---"
-          python discord_updater.py "$FILE" --title "$TITLE" --color "$COLOR" --emoji "$EMOJI" --dry-run | head -n 100
+          if [ -z "$WEBHOOK" ]; then
+            echo "::warning::Webhook secret '$SECRET_NAME' is not set, skipping Discord update for $TITLE"
+            exit 0
+          fi
+          python discord_updater.py "$RESULTS" --webhook "$WEBHOOK" --message-id-file "$MSG_FILE" \
+            --title "$TITLE" --color "$COLOR" --emoji "$EMOJI"
 
-      - name: Save Discord message ID - admin
-        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'admin' }}
-        uses: actions/cache/save@v4
-        with:
-          path: discord_message_id.txt
-          key: discord-message-id-admin-${{ hashFiles('discord_message_id.txt') }}
+      # Only on main: a run on any other branch must never push to main.
+      - name: Persist Discord message id
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
         continue-on-error: true
-
-      - name: Save Discord message ID - video-stars
-        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'video-stars' }}
-        uses: actions/cache/save@v4
-        with:
-          path: discord_message_id_video_stars.txt
-          key: discord-message-id-video-stars-${{ hashFiles('discord_message_id_video_stars.txt') }}
-        continue-on-error: true
-
-      - name: Save Discord message ID - developers
-        if: ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker) && matrix.tracker == 'developers' }}
-        uses: actions/cache/save@v4
-        with:
-          path: discord_message_id_developers.txt
-          key: discord-message-id-developers-${{ hashFiles('discord_message_id_developers.txt') }}
-        continue-on-error: true
-
-      - name: Persist Discord message ID to repo
-        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker)
+        env:
+          ID: ${{ matrix.id }}
+          MSG_FILE: ${{ matrix.messageIdFile }}
         run: |
-          case "${{ matrix.tracker }}" in
-            admin) MSG_FILE="discord_message_id.txt"; REPO_FILE=".github/discord_message_id.txt";;
-            video-stars) MSG_FILE="discord_message_id_video_stars.txt"; REPO_FILE=".github/discord_message_id_video_stars.txt";;
-            developers) MSG_FILE="discord_message_id_developers.txt"; REPO_FILE=".github/discord_message_id_developers.txt";;
-          esac
-          if [ -f "$MSG_FILE" ]; then
-            mkdir -p .github
-            cp "$MSG_FILE" "$REPO_FILE"
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add "$REPO_FILE" || true
-            git diff --staged --quiet || git commit -m "chore: update ${{ matrix.tracker }} message id [skip ci]" || true
-            git pull --rebase origin main || true
-            git push origin HEAD:main || echo "Push failed - cache handles it"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$MSG_FILE"
+          if git diff --staged --quiet; then
+            echo "Message id unchanged"
+            exit 0
           fi
-        continue-on-error: true
+          git commit -m "chore: update $ID message id [skip ci]"
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then exit 0; fi
+            sleep $((attempt * 2))
+          done
+          echo "::warning::Could not push the new $ID message id; the next run will post a new message"
 
+  # ---------------------------------------------------------------------------
+  # Best-effort follow step. Bounded so a slow run can't pile up behind the next ones.
+  # ---------------------------------------------------------------------------
   follow:
-    needs: merge
+    needs: [plan, merge]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
-    if: always()
+    timeout-minutes: 20
+    concurrency:
+      group: trackers-follow-${{ matrix.id }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
-        tracker: [admin, video-stars, developers]
+        include: ${{ fromJSON(needs.plan.outputs.trackers) }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
-      - name: Install deps
-        run: pip install requests pyyaml
-      - name: Download final results for ${{ matrix.tracker }}
-        uses: actions/download-artifact@v4
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Download merged results
+        uses: actions/download-artifact@v8
+        continue-on-error: true
         with:
-          pattern: final-results-${{ matrix.tracker }}
-          merge-multiple: true
+          name: final-results-${{ matrix.id }}
           path: .
-      - name: Follow Unknowns for ${{ matrix.tracker }} (2 per account +30s rotate)
-        # Runs even when device off — cloud only
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
+
+      - name: Follow Unknowns for ${{ matrix.id }}
+        continue-on-error: true
+        timeout-minutes: 15
         env:
+          TRACKER: ${{ matrix.id }}
+          RESULTS: ${{ matrix.resultsFile }}
           ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
           ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
           ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
@@ -274,17 +272,9 @@ jobs:
           ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
           ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
         run: |
-          # Map tracker to JSON file
-          case "${{ matrix.tracker }}" in
-            admin) FILE="roblox_scan_results.json";;
-            video-stars) FILE="roblox_scan_results_video.json";;
-            developers) FILE="roblox_scan_results_developers.json";;
-          esac
-          echo "Follow step for ${{ matrix.tracker }} file $FILE"
-          ls -lh $FILE || echo "No $FILE, skipping follow"
-          if [ ! -f "$FILE" ]; then exit 0; fi
-          echo "Checking Unknowns in $FILE"
-          python follow_unknown.py --tracker "${{ matrix.tracker }}" --json "$FILE" 2>&1 | tail -n 100
-          # Exit code 2 means some failed but not fatal for workflow
-          echo "Follow step done for ${{ matrix.tracker }}"
-        continue-on-error: true
+          if [ ! -f "$RESULTS" ]; then
+            echo "No $RESULTS, skipping follow"
+            exit 0
+          fi
+          # Exit code 2 = some follows failed; not fatal for the workflow
+          python follow_unknown.py --tracker "$TRACKER" --json "$RESULTS"

@@ -1,35 +1,51 @@
-# Single source of truth — add a tracker here, workflow picks it up automatically
-# No workflow edit needed. Colors are hex, webhook is secrets name.
+# Single source of truth — the workflow builds its job matrix from this file.
+# Add a tracker here and the scheduled runs pick it up (for manual runs, also add its id to the
+# `tracker` choice list in .github/workflows/trackers.yml).
+#
+# Fields:
+#   id             short id, used for artifact names and --tracker
+#   name           embed title (also selects the "nobody in-game" wording)
+#   groupId        Roblox group to scan            \  at least one of
+#   idsFile        file of user IDs, one per line  /  groupId / idsFile
+#   extraIds       extra user IDs to include even if not in the group
+#   shards         how many parallel scan jobs (default 1; use 3 for big groups)
+#   color          embed color (hex)
+#   emoji          emoji shown before each name
+#   webhookSecret  name of the Actions secret holding the Discord webhook URL
+#   resultsFile    merged scan output (consumed by the Discord + follow steps)
+#   messageIdFile  committed file remembering which Discord message to edit
 
 trackers:
   - id: admin
     name: Admin Tracker
     groupId: 1200769
-    color: "#305778"  # 3168504 decimal
+    shards: 3
+    color: "#305778"
     emoji: "<:roblox:1551329066337050754>"
     webhookSecret: DISCORD_WEBHOOK
-    messageIdFile: discord_message_id.txt
-    repoMessageId: .github/discord_message_id.txt
+    resultsFile: roblox_scan_results.json
+    messageIdFile: .github/discord_message_id.txt
 
   - id: video-stars
     name: Video Star Tracker
     groupId: 4199740
-    extraIds: [1377033267]  # skpm_plz — also in Admin, now mirrored here
-    # alternatively extraIdsFile: config/video_star_extra_ids.txt
+    extraIds: [1377033267]  # skpm_plz — also in Admin, mirrored here
+    shards: 3
     color: "#F9E999"
     emoji: "<:verified:1551329029783691334>"
     webhookSecret: DISCORD_WEBHOOK_VIDEO_STARS
-    messageIdFile: discord_message_id_video_stars.txt
-    repoMessageId: .github/discord_message_id_video_stars.txt
+    resultsFile: roblox_scan_results_video.json
+    messageIdFile: .github/discord_message_id_video_stars.txt
 
   - id: developers
     name: Developer Tracker
-    idsFile: config/developer_ids.txt  # 103 IDs
+    idsFile: config/developer_ids.txt
+    shards: 1  # small list (~100 IDs): one job is faster than three
     color: "#000000"
     emoji: "<:developer:1551388816324169838>"
     webhookSecret: DISCORD_WEBHOOK_DEVELOPERS
-    messageIdFile: discord_message_id_developers.txt
-    repoMessageId: .github/discord_message_id_developers.txt
+    resultsFile: roblox_scan_results_developers.json
+    messageIdFile: .github/discord_message_id_developers.txt
 
 settings:
   targetPlaceId: 74205509034203
