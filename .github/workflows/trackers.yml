@@ -236,3 +236,55 @@ jobs:
             git push origin HEAD:main || echo "Push failed - cache handles it"
           fi
         continue-on-error: true
+
+  follow:
+    needs: merge
+    runs-on: ubuntu-latest
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        tracker: [admin, video-stars, developers]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: pip install requests pyyaml
+      - name: Download final results for ${{ matrix.tracker }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: final-results-${{ matrix.tracker }}
+          merge-multiple: true
+          path: .
+      - name: Follow Unknowns for ${{ matrix.tracker }} (2 per account +30s rotate)
+        # Runs even when device off — cloud only
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.tracker == 'all' || inputs.tracker == '' || matrix.tracker == inputs.tracker }}
+        env:
+          ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
+          ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
+          ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
+          ROBLOSECURITY_2: ${{ secrets.ROBLOSECURITY_2 }}
+          ROBLOSECURITY_3: ${{ secrets.ROBLOSECURITY_3 }}
+          ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
+          ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
+        run: |
+          # Map tracker to JSON file
+          case "${{ matrix.tracker }}" in
+            admin) FILE="roblox_scan_results.json";;
+            video-stars) FILE="roblox_scan_results_video.json";;
+            developers) FILE="roblox_scan_results_developers.json";;
+          esac
+          echo "Follow step for ${{ matrix.tracker }} file $FILE"
+          ls -lh $FILE || echo "No $FILE, skipping follow"
+          if [ ! -f "$FILE" ]; then exit 0; fi
+          echo "Checking Unknowns in $FILE"
+          python follow_unknown.py --tracker "${{ matrix.tracker }}" --json "$FILE" 2>&1 | tail -n 100
+          # Exit code 2 means some failed but not fatal for workflow
+          echo "Follow step done for ${{ matrix.tracker }}"
+        continue-on-error: true
