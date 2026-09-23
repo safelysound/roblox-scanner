@@ -15,13 +15,21 @@ Pool: ROBLOX_COOKIE, ROBLOSECURITY, ROBLOSECURITY_1..5 (6 accounts)
 Rule: each account max 2 follows, then 30s cooldown before reuse, rotate until all Unknown are followed.
 Runs in background on GitHub Actions after embed update, no device needed.
 
-Exit 0 if all followed or none, 2 if some failed.
+Failure handling (pacing above is unchanged):
+  - a user is skipped after MAX_TRIES_PER_USER failed attempts (challenge / error / other failure)
+  - the run stops early when 2 x pool-size attempts in a row fail (everything is being blocked; stop
+    instead of hammering Roblox and risking the accounts)
+  - the run stops gracefully after --max-seconds (default 600)
+
+Exit 0 if all followed or none, 2 if some failed / were not attempted.
 """
 import os, sys, time, json, argparse, requests, random
+from collections import Counter
 from pathlib import Path
 
 FOLLOW_API = "https://friends.roblox.com/v1/users/{uid}/follow"
 CSRF_URL = "https://auth.roblox.com/v2/logout"
+MAX_TRIES_PER_USER = 3
 
 def _normalize(raw):
     raw=raw.strip().strip('"').strip("'")
@@ -113,6 +121,7 @@ def main():
     ap.add_argument("--json", dest="json_file", default="", help="explicit json file")
     ap.add_argument("--file", dest="file", default="", help="alias for --json")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--max-seconds", type=int, default=600, help="stop gracefully after this many seconds")
     args=ap.parse_args()
     json_file=args.json_file or args.file
     if not json_file:
@@ -164,13 +173,20 @@ def main():
 
     total=len(unknowns)
     idx=0
-    successes=0
     attempts=0
     start=time.time()
-    # Round-robin with 2-per-account + 30s cooldown
-    # Each account state: follows (0-1), cooldown_until timestamp
-    # When follows==2 -> set cooldown_until=now+30, follows=0 after cooldown
+    deadline=start+args.max_seconds
+    followed=set(); skipped=[]
+    stats=Counter()
+    tries={}            # uid -> failed attempts so far
+    consec_fail=0       # failed attempts in a row, across users/accounts
+    abort_after=2*len(pool)
+    stop_reason=""
+    # Round-robin, 2 follows per account then a 30s cooldown for that account
     while idx < len(unknowns):
+        if time.time() >= deadline:
+            stop_reason=f"time budget of {args.max_seconds}s reached"
+            break
         uid=unknowns[idx]
         now=time.time()
         # Find available session
@@ -190,8 +206,11 @@ def main():
                 avail=sess
                 break
         if avail is None:
-            # all on cooldown, wait until earliest
+            # all on cooldown, wait until earliest (but never past the deadline)
             wait = max(0, earliest - now) + 0.2
+            if now + wait >= deadline:
+                stop_reason=f"time budget of {args.max_seconds}s reached"
+                break
             print(f"All {len(pool)} accounts on cooldown (2/2), waiting {wait:.1f}s until {earliest:.0f}...", file=sys.stderr)
             time.sleep(wait)
             continue
@@ -200,9 +219,11 @@ def main():
         print(f"[{idx+1}/{total}] Follow {uid} via {key} ({avail['follows']+1}/2, cooldown {avail['cooldown_until']:.0f})...", flush=True, file=sys.stderr)
         status, code, msg = follow_one(sess, uid)
         attempts+=1
+        stats[status]+=1
         if status in ("ok","already"):
             print(f"  -> {status} {code}", file=sys.stderr)
-            successes+=1
+            followed.add(uid)
+            consec_fail=0
             avail["follows"]+=1
             if avail["follows"] >= 2:
                 avail["cooldown_until"]=time.time()+30
@@ -210,47 +231,48 @@ def main():
             idx+=1
             # small jitter between follows to avoid 429
             time.sleep(random.uniform(0.6,1.2))
-        elif status=="retry":
+            continue
+        if status=="retry":
             wait=code
             print(f"  -> 429 retry {wait}s {msg[:120]}", file=sys.stderr)
             # treat as cooldown for this account
             avail["cooldown_until"]=time.time()+ max(wait,30)
             avail["follows"]=0
-            time.sleep(wait)
-        elif status=="challenge":
-            print(f"  -> 403 challenge {msg[:120]} -> switch account, mark cooldown", file=sys.stderr)
+            time.sleep(min(wait, max(0, deadline-time.time())))
+            continue
+        # challenge / fail / error: count against this user and against the run
+        consec_fail+=1
+        tries[uid]=tries.get(uid,0)+1
+        if status=="challenge":
+            print(f"  -> 403 challenge {msg[:120]} -> cooling {key} 30s", file=sys.stderr)
             avail["cooldown_until"]=time.time()+30
             avail["follows"]=0
-            # do not increment idx, try same uid with next account (loop will pick next avail)
             time.sleep(1)
         else:
-            print(f"  -> fail {code} {msg[:200]} -> will retry with next account", file=sys.stderr)
-            # rotate to next account without incrementing idx? Try same uid with different account
-            # Mark this account as cooling briefly
+            print(f"  -> {status} {code} {msg[:200]} -> cooling {key} 5s", file=sys.stderr)
             avail["cooldown_until"]=time.time()+5
-            # Try next available in next loop iteration
             time.sleep(1)
-            # To avoid infinite loop, after trying all pools, we need to move on if all fail
-            # Check if we've tried all pools for this uid in last N attempts - simple: if attempts > len(pool)*3 and still failing, skip
-            # For now, rotate: move uid to end if we've looped through all pools once
-            # Count how many accounts have been tried for this uid in this iteration
-            # Simpler: just try next account; if all accounts fail 2 times, skip
-            # We'll track tries per uid
-            # If this is 3rd fail for same uid, skip it
-            # Use a simple counter
-            if not hasattr(main, "_fail_counts"):
-                main._fail_counts={}
-            cnt=main._fail_counts.get(uid,0)+1
-            main._fail_counts[uid]=cnt
-            if cnt >= len(pool)*2:
-                print(f"  skipping {uid} after {cnt} fails", file=sys.stderr)
-                idx+=1
-            # else stay on same idx to retry with next account
+        if consec_fail >= abort_after:
+            stop_reason=f"{consec_fail} attempts in a row failed (last: {status} {code}); all accounts look blocked"
+            break
+        if tries[uid] >= MAX_TRIES_PER_USER:
+            print(f"  skipping {uid} after {tries[uid]} failed attempts", file=sys.stderr)
+            skipped.append(uid)
+            idx+=1
 
     elapsed=time.time()-start
-    print(f"Done: followed {successes}/{total} Unknown in {elapsed:.1f}s", file=sys.stderr)
-    if successes < total:
-        print(f"Failed {total-successes}: {[u for u in unknowns if u not in []]}", file=sys.stderr)
+    not_followed=[u for u in unknowns if u not in followed]
+    summary=(f"followed {len(followed)}/{total} in {elapsed:.0f}s | requests={attempts} "
+             + " ".join(f"{k}={v}" for k,v in sorted(stats.items()))
+             + f" | skipped={len(skipped)} not_attempted={len(not_followed)-len(skipped)}")
+    print(f"Done: {summary}", file=sys.stderr)
+    if stop_reason:
+        print(f"Stopped early: {stop_reason}", file=sys.stderr)
+    # Annotation (readable via the Checks API even when raw logs aren't available)
+    level="notice" if not not_followed else "warning"
+    print(f"::{level} title=follow {args.tracker}::{summary}" + (f" | stopped: {stop_reason}" if stop_reason else ""))
+    if not_followed:
+        print(f"Not followed {len(not_followed)}: {not_followed[:20]}{' ...' if len(not_followed)>20 else ''}", file=sys.stderr)
         sys.exit(2)
     sys.exit(0)
 
