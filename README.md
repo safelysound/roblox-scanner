@@ -1,97 +1,75 @@
 # Roblox Tracker — `Official Group` / `Video Stars` / `Developers` → `The Hunt`
 
-Single config, single scanner for all 3 trackers. Detects who is playing [The Hunt: Roblox 20 (74205509034203)](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20) and edits the same Discord embed every 5 min.
+One config, one scanner, three trackers. Detects who is playing [The Hunt: Roblox 20 (74205509034203)](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20) and keeps one Discord embed per tracker up to date, editing the same message every ~5 minutes. Runs entirely on GitHub Actions (free for public repos).
 
-**Public repo / GitHub Actions ready - 0$ (cloud) + optional home run for follows**
-
-## Quick Start (Local, 30s)
+## Quick start (local)
 
 ```bash
-pip install requests pyyaml
+pip install -r requirements.txt
 python tracker_scanner.py --tracker developers --max-members 10 --verbose
 python tracker_scanner.py --tracker video-stars --max-members 10 --verbose
-python tracker_scanner.py --tracker admin --max-members 10 --verbose
+python tracker_scanner.py --tracker admin --max-members 10 --verbose --json out_admin.json
 # -> JSON: target_game_players (Hunt) + other_game_players + offline_or_website
 ```
 
-## Config — Add a Tracker = 1 Line (no workflow edit)
-
-Edit `config/trackers.yaml`:
-
-```yaml
-trackers:
-  - id: admin
-    name: Admin Tracker
-    groupId: 1200769
-    color: "#305778"
-    emoji: "<:roblox:1551329066337050754>"
-    webhookSecret: DISCORD_WEBHOOK
-
-  - id: video-stars
-    name: Video Star Tracker
-    groupId: 4199740
-    extraIds: [1377033267]  # extra user even if not in group
-    color: "#F9E999"
-    emoji: "<:verified:1551329029783691334>"
-    webhookSecret: DISCORD_WEBHOOK_VIDEO_STARS
-
-  - id: developers
-    name: Developer Tracker
-    idsFile: config/developer_ids.txt  # one ID per line, # comments
-    color: "#000000"
-    emoji: "<:developer:1551388816324169838>"
-    webhookSecret: DISCORD_WEBHOOK_DEVELOPERS
-```
-
-Edit `config/developer_ids.txt` to add/remove IDs — next 5-min run picks it up automatically.
-
-## GitHub Actions (Unified, 1 Workflow)
-
-`Actions → Trackers → Run workflow`:
-
-- `tracker: all | admin | video-stars | developers` (default `all`)
-- `place_id: 74205509034203`
-- `max_members: 10` for test (empty = all)
-
-Runs 9 shards in parallel (3 trackers × 3 shards), merges, edits same Discord message per tracker. Free for public repos.
-
-**Secrets (Settings → Secrets → Actions):**
-
-- `ROBLOX_COOKIE` / `ROBLOSECURITY` / `ROBLOSECURITY_1..5` — alt cookies (6-pool, 6× faster, reveals hidden Hunt via Friends-only)
-- `DISCORD_WEBHOOK` (Admin) / `DISCORD_WEBHOOK_VIDEO_STARS` / `DISCORD_WEBHOOK_DEVELOPERS`
-
-## Follow (Home IP Only - 0$)
-
-Cloud (GitHub) gets `403 Challenge` when following — by design (datacenter IP). For hidden `InGame` with `placeId:null` to show Hunt, follow once from home:
+Sharded, like CI does it:
 
 ```bash
-pip install requests pyyaml
-export ROBLOX_COOKIE="_|WARNING...|"
-python follow.py --tracker developers --dry-run        # counts
-python follow.py --tracker developers                  # 103 ~20 min (12s + backoff, 6-pool)
-python follow.py --tracker video-stars --pool 6        # 614 ~20 min
-python follow.py --tracker all --pool 6                # 3491 ~2h (shards across 6 alts, bypasses 1k follow cap)
-# Or cloud dry-run: Actions → Follow → tracker=developers, dry_run=true
+for i in 0 1 2; do
+  python tracker_scanner.py --tracker admin --shard $i --shards 3 --json shard_admin_$i.json
+done
+python merge_shards.py shard_admin_*.json --json roblox_scan_results.json
+python discord_updater.py roblox_scan_results.json --title "Admin Tracker" --dry-run   # preview the embed
 ```
 
-After one home bulk follow, cloud 5-min scans see Hunt without needing residential runner.
+Cookies are read from environment variables (see `cookies.example.txt`); without any, the scan still works but hidden presence stays hidden.
+
+## Config — add a tracker without touching the workflow
+
+Everything lives in [`config/trackers.yaml`](config/trackers.yaml): group ID and/or ID file, extra IDs, shard count, embed title/colour/emoji, webhook secret name, results file and message-id file. The workflow builds its job matrix from that file, so a new tracker is one YAML block plus its webhook secret. (For *manual* runs, also add the id to the `tracker` choice list in the workflow.)
+
+Edit `config/developer_ids.txt` (one ID per line, `#` comments) to change the developer list; the next run picks it up.
+
+## GitHub Actions
+
+`.github/workflows/trackers.yml` runs on `workflow_dispatch` (an external cron hits it every ~5 minutes) and on pushes to `main`:
+
+1. **plan** — reads `config/trackers.yaml`, builds the tracker/shard matrix.
+2. **scan** — one job per tracker shard (`tracker_scanner.py`).
+3. **merge** — merges shards, edits the Discord embed, commits a new message id if one was created. If a shard is missing the merge is skipped and the previous embed stays (a partial merge would silently drop people).
+4. **follow** — best-effort `follow_unknown.py`, time-boxed and serialized per tracker.
+
+Manual run: *Actions → Trackers → Run workflow* (`tracker`, `place_id`, `max_members` for quick tests).
+
+**Secrets** (Settings → Secrets and variables → Actions):
+
+- `ROBLOX_COOKIE`, `ROBLOSECURITY`, `ROBLOSECURITY_1` … `ROBLOSECURITY_5` — cookie pool (more cookies = more presence requests per minute)
+- `DISCORD_WEBHOOK` (Admin), `DISCORD_WEBHOOK_VIDEO_STARS`, `DISCORD_WEBHOOK_DEVELOPERS`
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `tracker_scanner.py` | **Universal scanner** — group + ID list + extraIds union, sharded `--shard 0/3`, 6-cookie pool, pooled `isFollowing` + profile scrape |
-| `follow.py` | Unified follow (`--tracker all|admin|video-stars|developers --pool 6 --dry-run`) — thin wrapper over `follow_all_trackers.py` logic |
-| `config/trackers.yaml` | Single source of truth — add tracker without touching workflow |
-| `config/developer_ids.txt` | Developer list (103) — live reload each 5 min |
-| `.github/workflows/trackers.yml` | **Single workflow** — 9 shards + 3 merges + 3 Discord edits every 5 min |
-| `.github/workflows/follow-devs.yml` | Manual follow (residential) |
-| `merge_shards.py` | Merges `shard_*.json` → `roblox_scan_results*.json/csv` |
-| `discord_updater.py` | Edits same Discord embed (Hunt + Unknown only, spec_keep) |
+| `tracker_scanner.py` | Scanner: group + ID list + extra IDs, sharded, cookie pool, follow detection |
+| `developer_scanner.py` | Presence / cookie / profile helpers used by `tracker_scanner.py` (must stay; can also run standalone) |
+| `merge_shards.py` | Merges `shard_*.json` into one results file |
+| `discord_updater.py` | Builds and edits the Discord embed (Hunt + Unknown only) |
+| `follow_unknown.py` | Follows accounts whose status shows as "Unknown" so the game becomes visible |
+| `config/trackers.yaml` | Tracker definitions (single source of truth) |
+| `config/developer_ids.txt` | Developer ID list |
+| `.github/workflows/trackers.yml` | The workflow |
+| `.github/discord_message_id*.txt` | Which Discord message each tracker edits (committed by the workflow) |
 
 ## Why Hunt shows / hides
 
-Presence `placeId:null` for `InGame` = Roblox privacy (Friends only). If alt follows that user, presence returns `74205509034203` and Discord shows `[The Hunt: Roblox 20](link) (Must Follow to Join)`. `Unknown` = `InGame` hidden not following.
+Presence `placeId: null` while `InGame` means the user restricts who can see the game (Roblox privacy). If a pool account follows that user, presence returns `74205509034203` and the embed shows `[The Hunt: Roblox 20](link) (Must Follow to Join)`. `Unknown` = in a game but hidden, and not followed yet.
+
+Note: GitHub's datacenter IPs often get a `403 Challenge` when following, so the cloud follow step is best-effort.
+
+## Security notes
+
+- Never commit cookies; use Actions secrets or env vars. Logs of public repos are public, so the scripts never print cookie fragments or account info.
+- Rotate a cookie/webhook immediately if it is ever exposed.
 
 ## License
 

@@ -2,9 +2,21 @@
 cookies.txt
 cookies.json
 .env
-roblox_scan_results.json
-roblox_scan_results.csv
+
+# Scan output (generated in CI / local runs)
+roblox_scan_results*.json
+roblox_scan_results*.csv
 shard_*.json
+shards/
+
+# Local copies of Discord message-id state (the committed copies live in .github/)
+/discord_message_id*.txt
+
+# Large local game files
+*.rbxlx
+*.rbxl
+save.zip
+
 # Python
 __pycache__/
 *.pyc

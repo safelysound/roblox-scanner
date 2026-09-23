@@ -1,26 +1,15 @@
-# ROBLOSECURITY Cookie Pool — Example (up to 6)
-# How to get your cookie:
-# 1. Login to Roblox in Chrome/Firefox
-# 2. Press F12 → Application → Cookies → https://www.roblox.com
-# 3. Find .ROBLOSECURITY → Copy Value (starts with _|WARNING:-DO-NOT-SHARE-THIS...)
-# 4. Paste one per line below (or use env vars / --cookies flag)
+# ROBLOSECURITY cookie pool — example only, NEVER commit real cookies.
 #
-# SECURITY: NEVER commit this file with real cookies! Keep it private and git-ignored.
-# This file is a template — replace the placeholders below.
+# The scanner reads cookies from environment variables (in this priority order):
+#   ROBLOX_COOKIE, ROBLOSECURITY, ROBLOSECURITY_1 ... ROBLOSECURITY_6
+# In GitHub Actions, set them as repository secrets with those names.
+# Locally, export them in your shell instead of using a file:
 #
-# Usage:
-#   python roblox_group_scanner.py --cookie-file cookies.txt
-#   # or
-#   ROBLOSECURITY_1="..." ROBLOSECURITY_2="..." python roblox_group_scanner.py
-#   # or edit ROBLOSECURITY_COOKIES list at top of roblox_group_scanner.py
+#   export ROBLOSECURITY_1="_|WARNING:-DO-NOT-SHARE-THIS...|REPLACE_ME"
+#   export ROBLOSECURITY_2="_|WARNING:-DO-NOT-SHARE-THIS...|REPLACE_ME"
+#   python tracker_scanner.py --tracker developers --max-members 10 --verbose
 #
-# With 1 cookie (unauthenticated fallback): ~80-90s for 2771 members (60 req/min)
-# With 6 cookies: ~15-20s for 2771 members (360 req/min) — 4-5x faster
+# How to get a cookie: log in to Roblox, open DevTools (F12) -> Application -> Cookies
+# -> https://www.roblox.com -> copy the value of .ROBLOSECURITY.
 #
-
-_|WARNING:-DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items.|REPLACE_WITH_COOKIE_1_HERE
-_|WARNING:-DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items.|REPLACE_WITH_COOKIE_2_HERE
-_|WARNING:-DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items.|REPLACE_WITH_COOKIE_3_HERE
-_|WARNING:-DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items.|REPLACE_WITH_COOKIE_4_HERE
-_|WARNING:-DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items.|REPLACE_WITH_COOKIE_5_HERE
-_|WARNING:-DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items.|REPLACE_WITH_COOKIE_6_HERE
+# More cookies = more presence requests per minute. One cookie works; extras just spread the load.
