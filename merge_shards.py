@@ -10,7 +10,7 @@ import csv
 import sys
 import glob
 from pathlib import Path
-from typing import List, Dict
+from typing import List
 
 def merge_shards(paths: List[str], json_out: str = "", csv_out: str = ""):
     # Expand globs for Windows (cmd doesn't expand shard_*.json)

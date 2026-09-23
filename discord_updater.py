@@ -74,8 +74,17 @@ def get_game_link(place_id, universe_id, last_location: str):
         return name, url
     return None, None
 
+def empty_message(title: str) -> str:
+    t = title.lower()
+    if "developer" in t:
+        return "No developers currently in-game."
+    if "video" in t:
+        return "No Video Stars currently in-game."
+    if "admin" in t:
+        return "No admins currently in-game."
+    return "No one currently in-game."
+
 def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=ROBLOX_EMOJI):
-    meta = data.get("meta", {})
     target = data.get("target_game_players", [])
     other = data.get("other_game_players", [])
 
@@ -148,16 +157,7 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
 
     # Empty case — tracker-specific no-players line
     if not filtered:
-        if "developer" in title.lower():
-            empty_msg = "No developers currently in-game."
-        elif "video" in title.lower():
-            empty_msg = "No Video Stars currently in-game."
-        elif "admin" in title.lower():
-            empty_msg = "No admins currently in-game."
-        else:
-            empty_msg = "No one currently in-game."
-        desc = f"{empty_msg}\n{footer}"
-        return [{"title": title, "color": color, "description": desc}]
+        return [{"title": title, "color": color, "description": f"{empty_message(title)}\n{footer}"}]
 
     lines = []
     for u in filtered:
@@ -202,7 +202,9 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
         line = f"- {emoji} [{display} (@{username})]({profile})\n  - Playing: {playing}"
         lines.append(line)
 
-    TOTAL_LIMIT = 6000
+    # Discord caps the sum of all embed text (titles included) at 6000; each embed repeats the title.
+    # A 6000-char budget can span at most 2 description chunks, so reserve room for 2 titles.
+    TOTAL_LIMIT = 6000 - 2 * len(title)
     filtered_lines = []
     running_total = 0
     truncated = 0
@@ -216,18 +218,9 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
     lines = filtered_lines
 
     if not lines:
-        if "developer" in title.lower():
-            empty_msg = "No developers currently in-game."
-        elif "video" in title.lower():
-            empty_msg = "No Video Stars currently in-game."
-        elif "admin" in title.lower():
-            empty_msg = "No admins currently in-game."
-        else:
-            empty_msg = "No one currently in-game."
+        desc = f"{empty_message(title)}\n{footer}"
         if truncated > 0:
-            desc = f"{empty_msg}\n{footer}\n-# +{truncated} more not shown (6000 limit)"
-        else:
-            desc = f"{empty_msg}\n{footer}"
+            desc += f"\n-# +{truncated} more not shown (6000 limit)"
         return [{"title": title, "color": color, "description": desc}]
 
     chunks = []
@@ -278,7 +271,7 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
     if len(embeds) > 10:
         embeds = embeds[:10]
         last = embeds[-1]
-        notice = f"\n... and more not shown (limit 10 embeds)"
+        notice = "\n... and more not shown (limit 10 embeds)"
         if len(last["description"]) + len(notice) > MAX_DESC:
             last["description"] = last["description"][:MAX_DESC - len(notice) - 1] + notice
         else:
@@ -313,78 +306,88 @@ def save_message_id(path: str, msg_id: str):
     Path(path).write_text(str(msg_id).strip(), encoding="utf-8")
     print(f"Saved message ID {msg_id} to {path}")
 
+def _send(method: str, url: str, payload: dict, idempotent: bool, attempts: int = 3):
+    """requests.request with bounded retries.
+
+    Always retries HTTP 429 (honouring retry_after). Network errors and 5xx are only retried when the
+    call is idempotent (PATCH): retrying a POST after a timeout could create a duplicate message.
+    """
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            r = requests.request(method, url, json=payload, timeout=15)
+        except requests.RequestException as e:
+            last_exc = e
+            print(f"{method} attempt {attempt}/{attempts} failed: {type(e).__name__}", file=sys.stderr)
+            if not idempotent or attempt == attempts:
+                raise
+            time.sleep(2 * attempt)
+            continue
+        if attempt < attempts:
+            if r.status_code == 429:
+                try:
+                    wait = float(r.json().get("retry_after", 5))
+                except Exception:
+                    wait = 5.0
+                print(f"Rate limited, retrying in {min(wait, 30):.1f}s", file=sys.stderr)
+                time.sleep(min(wait, 30) + 0.5)
+                continue
+            if idempotent and r.status_code >= 500:
+                print(f"{method} got {r.status_code}, retrying ({attempt}/{attempts})", file=sys.stderr)
+                time.sleep(2 * attempt)
+                continue
+        return r
+    raise last_exc  # pragma: no cover - loop always returns or raises
+
 def send_or_edit(webhook_url: str, embeds: list, message_id_file: str):
-    webhook_url = webhook_url.strip()
-    if not webhook_url:
-        webhook_url = os.environ.get("DISCORD_WEBHOOK", "") or os.environ.get("DISCORD_WEBHOOK_URL", "")
+    webhook_url = (webhook_url or "").strip() or os.environ.get("DISCORD_WEBHOOK", "") or os.environ.get("DISCORD_WEBHOOK_URL", "")
     if not webhook_url:
         print("No webhook URL provided (arg --webhook or env DISCORD_WEBHOOK)", file=sys.stderr)
         sys.exit(1)
     payload = {"embeds": embeds}
+    base = webhook_url.split("?")[0]
     existing_id = load_message_id(message_id_file) if message_id_file else ""
+
     if existing_id:
         print(f"Found existing message ID {existing_id}, trying to edit...")
-        base = webhook_url.split("?")[0]
-        edit_url = f"{base}/messages/{existing_id}"
         try:
-            r = requests.patch(edit_url, json=payload, timeout=15)
-            print(f"PATCH {edit_url} -> {r.status_code}")
-            if r.status_code in (200, 204):
-                print("Edited existing message successfully.")
-                return existing_id
-            else:
-                print(f"Edit failed ({r.status_code}): {r.text[:500]}")
-                if r.status_code == 404:
-                    print("Message not found (404), will create new one...")
-                    existing_id = ""
-                else:
-                    if r.status_code == 429:
-                        try:
-                            j = r.json()
-                            retry_after = j.get("retry_after", 5)
-                            print(f"Rate limited, retry after {retry_after}s")
-                            time.sleep(float(retry_after) + 1)
-                            r2 = requests.patch(edit_url, json=payload, timeout=15)
-                            if r2.status_code in (200, 204):
-                                print("Edit succeeded after retry.")
-                                return existing_id
-                        except:
-                            pass
-                    if r.status_code != 404:
-                        print("Edit failed, exiting without creating duplicate.")
-                        sys.exit(1)
-        except Exception as e:
-            print(f"PATCH exception: {e}", file=sys.stderr)
+            r = _send("PATCH", f"{base}/messages/{existing_id}", payload, idempotent=True)
+        except requests.RequestException as e:
+            print(f"PATCH failed: {type(e).__name__}", file=sys.stderr)
             sys.exit(1)
-    if not existing_id:
-        print("Creating new webhook message...")
-        separator = "&" if "?" in webhook_url else "?"
-        post_url = f"{webhook_url}{separator}wait=true"
-        try:
-            r = requests.post(post_url, json=payload, timeout=15)
-            print(f"POST {post_url.split('?')[0]}/...?wait=true -> {r.status_code}")
-            if r.status_code in (200, 204):
-                try:
-                    j = r.json()
-                    msg_id = str(j.get("id", ""))
-                    if msg_id:
-                        print(f"Created message ID {msg_id}")
-                        if message_id_file:
-                            save_message_id(message_id_file, msg_id)
-                        return msg_id
-                    else:
-                        print("POST succeeded but no ID in response.")
-                        print(r.text[:1000])
-                        return ""
-                except:
-                    print(f"POST response not JSON: {r.text[:500]}")
-                    return ""
-            else:
-                print(f"POST failed {r.status_code}: {r.text[:1000]}")
-                sys.exit(1)
-        except Exception as e:
-            print(f"POST exception: {e}", file=sys.stderr)
+        print(f"PATCH .../messages/{existing_id} -> {r.status_code}")
+        if r.status_code in (200, 204):
+            print("Edited existing message successfully.")
+            return existing_id
+        if r.status_code != 404:
+            print(f"Edit failed ({r.status_code}): {r.text[:500]}")
+            print("Edit failed, exiting without creating a duplicate.")
             sys.exit(1)
+        print("Message not found (404), creating a new one...")
+
+    print("Creating new webhook message...")
+    separator = "&" if "?" in webhook_url else "?"
+    try:
+        r = _send("POST", f"{webhook_url}{separator}wait=true", payload, idempotent=False)
+    except requests.RequestException as e:
+        print(f"POST failed: {type(e).__name__}", file=sys.stderr)
+        sys.exit(1)
+    print(f"POST .../?wait=true -> {r.status_code}")
+    if r.status_code not in (200, 204):
+        print(f"POST failed {r.status_code}: {r.text[:1000]}")
+        sys.exit(1)
+    try:
+        msg_id = str(r.json().get("id", ""))
+    except ValueError:
+        print(f"POST response not JSON: {r.text[:500]}")
+        return ""
+    if not msg_id:
+        print("POST succeeded but no ID in response.")
+        return ""
+    print(f"Created message ID {msg_id}")
+    if message_id_file:
+        save_message_id(message_id_file, msg_id)
+    return msg_id
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Discord webhook updater - edit same message every 5 min")
