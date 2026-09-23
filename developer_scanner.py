@@ -10,7 +10,6 @@ Usage:
 
 import argparse
 import json
-import csv
 import time
 import sys
 import os
@@ -50,7 +49,7 @@ def _cookie_headers() -> Dict[str, str]:
     return base
 
 def _get_all_cookies():
-    """Return list of (key, cookie) for all 6 accounts, deduped by value. Prioritize ROBLOX_COOKIE (main 10218002102) first."""
+    """Return list of (key, cookie) for all configured accounts, deduped by value. ROBLOX_COOKIE takes priority."""
     pool=[]
     seen=set()
     for key in ["ROBLOX_COOKIE", "ROBLOSECURITY", "ROBLOSECURITY_1", "ROBLOSECURITY_2", "ROBLOSECURITY_3", "ROBLOSECURITY_4", "ROBLOSECURITY_5", "ROBLOSECURITY_6"]:
@@ -69,16 +68,15 @@ def _log_cookie_status():
     if pool:
         print(f"Cookie pool: {len(pool)} accounts — {[k for k,_ in pool]}", file=sys.stderr)
         for k,ck in pool:
-            suf = ck[-12:] if len(ck)>=12 else ck
-            print(f"  {k}: len {len(ck)} prefix {ck[:14]!r} suffix {suf!r} warn={'_|WARNING' in ck}", file=sys.stderr)
-        # Quick validation via mobileapi for first cookie
+            print(f"  {k}: len {len(ck)} warn={'_|WARNING' in ck}", file=sys.stderr)
+        # Quick validation via mobileapi for first cookie (status code only; never log the body)
         try:
-            import requests as _rq, sys as _sys
+            import requests as _rq
             _, ck0 = pool[0]
             r=_rq.get("https://www.roblox.com/mobileapi/userinfo", timeout=10, headers={"User-Agent":"Roblox/Android","Cookie": f".ROBLOSECURITY={ck0}", "Referer":"https://www.roblox.com/"})
-            print(f"mobileapi check {r.status_code} body {r.text[:400]!r}", file=_sys.stderr)
+            print(f"mobileapi check {r.status_code}", file=sys.stderr)
         except Exception as e:
-            print(f"mobileapi check error {e}", file=__import__("sys").stderr)
+            print(f"mobileapi check error {type(e).__name__}", file=sys.stderr)
         return True
     else:
         print("No ROBLOSECURITY/ROBLOX_COOKIE found — unauthenticated presence (Offline-hidden devs will stay Offline)", file=sys.stderr)
@@ -96,18 +94,9 @@ def _get_my_id(headers):
             rh=s.get("https://www.roblox.com/home", timeout=10)
             auth_m = re.search(r'"isAuthenticated"\s*:\s*true', rh.text)
             uid_m = re.search(r'"userId"\s*:\s*(\d+)', rh.text)
-            # Also check for generic logged-in markers
-            has_signout = "Sign Out" in rh.text or "Log Out" in rh.text
-            has_robux = "Robux" in rh.text
-            # find any alt ID in home
-            alt_in_home = "10218002102" in rh.text
-            print(f"home check status {rh.status_code} isAuth {bool(auth_m)} uid {uid_m.group(1) if uid_m else None} altInHome {alt_in_home} signout {has_signout} hasCookie {bool(ck)} len {len(rh.text)} snippet {rh.text[2000:2500]!r}", file=sys.stderr)
+            print(f"home check status {rh.status_code} isAuth {bool(auth_m)} hasCookie {bool(ck)}", file=sys.stderr)
             if auth_m and uid_m:
                 return int(uid_m.group(1))
-            # fallback check for alt id in home HTML
-            if "10218002102" in rh.text:
-                print("home shows alt 10218002102 directly", file=sys.stderr)
-                return 10218002102
         except Exception as e:
             print(f"home auth check error {e}", file=sys.stderr)
         r=_req.get("https://users.roblox.com/v1/users/authenticated", timeout=10, headers={"User-Agent":"Mozilla/5.0","Cookie": ck, "Referer":"https://www.roblox.com/", "Accept":"application/json"})
@@ -161,7 +150,7 @@ def _profile_shows_hunt(user_id, headers):
     Tries multiple endpoints that the website uses to show Hunt when Following.
     Free fix: get CSRF from HTML meta (not auth.roblox.com which 401s), then presence with CSRF — tries pool.
     """
-    import requests as _req, re, sys, time, json
+    import requests as _req, re, sys
     # Try pool in order so the cookie that actually follows reveals Hunt
     pool=_get_all_cookies()
     # Build candidate cookies: pool first, then fallback to headers cookie
@@ -175,9 +164,7 @@ def _profile_shows_hunt(user_id, headers):
     hdr_ck=headers.get("Cookie","")
     if hdr_ck and hdr_ck not in seen:
         candidates.append(hdr_ck)
-    # We will loop over candidates inside; for now set ck to first candidate for html_text path
     ck=candidates[0] if candidates else headers.get("Cookie","")
-    html_text=""
     csrf_from_html=None
     # Helper to try presence with a given ck
     def _try_presence_with_ck(try_ck, tok):
@@ -188,7 +175,6 @@ def _profile_shows_hunt(user_id, headers):
             print(f"profile scrape {user_id}: CSRF presence via {try_ck[:14]}... status {r3.status_code}, body {r3.text[:500]!r}", file=sys.stderr)
             # Also log isFollowing check for that cookie's followings
             try:
-                import re as _re3
                 # quick check if this cookie follows target via friends API (less verbose)
                 pass
             except: pass
@@ -217,7 +203,6 @@ def _profile_shows_hunt(user_id, headers):
         print(f"profile scrape {user_id}: HTML status {r.status_code}, len {len(r.text) if r else 0}", file=sys.stderr)
         if r.status_code==200:
             t=r.text
-            html_text=t
             # Extract CSRF from HTML for later presence call (avoids datacenter 401 on auth.roblox.com)
             m=re.search(r'<meta\s+name="csrf-token"\s+[^>]*data-token="([^"]+)"', t)
             if not m:
@@ -230,9 +215,8 @@ def _profile_shows_hunt(user_id, headers):
                 csrf_from_html=m.group(1)
                 print(f"profile scrape {user_id}: CSRF from HTML {csrf_from_html[:8]}...", file=sys.stderr)
             else:
-                # log if logged-in at all (check for alt id or RBXID marker)
-                logged = "10218002102" in t or "Sign Out" in t or "data-userid" in t.lower()
-                print(f"profile scrape {user_id}: no CSRF in HTML loggedIn?{logged} snippet {t[3000:3500]!r}", file=sys.stderr)
+                logged = "Sign Out" in t or "data-userid" in t.lower()
+                print(f"profile scrape {user_id}: no CSRF in HTML loggedIn?{logged}", file=sys.stderr)
             found=False
             if "74205509034203" in t:
                 print(f"profile scrape {user_id}: found Hunt via place in HTML", file=sys.stderr)
@@ -313,7 +297,7 @@ def _profile_shows_hunt(user_id, headers):
         print(f"profile scrape {user_id} CSRF presence error {e}", file=sys.stderr)
     # Try 3: Mobile presence endpoint — loop pool
     try:
-        import requests as _req3, sys as _sys3
+        import sys as _sys3
         for try_ck in candidates:
             tok3 = csrf_from_html
             h_mobile = {"User-Agent":"Roblox/Android","Accept":"application/json","Cookie": try_ck}
@@ -435,7 +419,6 @@ def fetch_user_infos(user_ids: List[int]) -> Dict[int, Dict[str, Any]]:
     headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json", "Accept": "application/json"}
     for start in range(0, len(uniq), 100):
         batch = uniq[start:start+100]
-        success=False
         for attempt in range(1, 6):
             try:
                 r = requests.post("https://users.roblox.com/v1/users", json={"userIds": batch}, timeout=15, headers=headers)
@@ -454,7 +437,6 @@ def fetch_user_infos(user_ids: List[int]) -> Dict[int, Dict[str, Any]]:
                         uid = entry.get("id")
                         if uid is not None:
                             result[uid] = {"userId": uid, "username": entry.get("name"), "displayName": entry.get("displayName"), "hasVerifiedBadge": entry.get("hasVerifiedBadge", False)}
-                    success=True
                     break
                 else:
                     print(f"Users batch {start//100} attempt {attempt} status {r.status_code}: {r.text[:200]}", file=sys.stderr)
@@ -515,7 +497,7 @@ def fetch_presences(user_ids: List[int]) -> Dict[int, Dict[str, Any]]:
     sess_fp=None
     if "Cookie" in headers and headers.get("Cookie"):
         try:
-            import requests as _req2, re
+            import re
             ck2=headers.get("Cookie","")
             sess_fp=_seeded_session(ck2)
             # Try HTML CSRF first (www.roblox.com not challenged)
@@ -553,7 +535,7 @@ def fetch_presences(user_ids: List[int]) -> Dict[int, Dict[str, Any]]:
                 r=requests.post(PRESENCE_API, json={"userIds": batch}, timeout=15, headers=headers)
             # If 403 due to bad cookie/CSRF, retry unauthenticated as fallback
             if r.status_code==403 and "Cookie" in headers:
-                print(f"Presence 403 with cookie — retrying unauthenticated (cookie may be invalid/expired)", file=sys.stderr)
+                print("Presence 403 with cookie — retrying unauthenticated (cookie may be invalid/expired)", file=sys.stderr)
                 headers_no_cookie = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
                 r=requests.post(PRESENCE_API, json={"userIds": batch}, timeout=15, headers=headers_no_cookie)
             if r.status_code==200:

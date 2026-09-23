@@ -1,116 +1,38 @@
 #!/usr/bin/env python3
 """
 Universal Tracker Scanner — single scanner for all trackers (Admin, Video Stars, Developers).
-Replaces roblox_group_scanner.py + developer_scanner.py.
-Reads config/trackers.yaml (id, groupId, idsFile, extraIds) + supports sharding + 6-cookie pool.
+Reads config/trackers.yaml (id, groupId, idsFile, extraIds), supports sharding and a multi-cookie pool.
+Presence/cookie helpers live in developer_scanner.py.
 
 Usage:
   python tracker_scanner.py --tracker admin --shard 0 --shards 3 --json shard_0.json --verbose
   python tracker_scanner.py --tracker developers --place-id 74205509034203 --json out.json
   python tracker_scanner.py --group-id 1200769 --place-id 74205509034203 --json out.json
-  python tracker_scanner.py --ids-file config/developer_ids.txt --json out.json
+  python tracker_scanner.py --user-ids-file config/developer_ids.txt --json out.json
 """
-import argparse, json, csv, time, sys, os
+import argparse, json, csv, time, sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+
 import requests
+import yaml
 
-# Try yaml, fallback to manual parse
-try:
-    import yaml
-    HAS_YAML=True
-except:
-    HAS_YAML=False
-
-# Import reused helpers from developer_scanner (kept for maintenance simplicity)
-# We dynamically import to avoid duplication; fallback to local definitions if import fails
-try:
-    import developer_scanner as _dev
-    _get_all_cookies = _dev._get_all_cookies
-    _log_cookie_status = _dev._log_cookie_status
-    _get_my_id = _dev._get_my_id
-    _seeded_session = _dev._seeded_session
-    _get_csrf_from_session = _dev._get_csrf_from_session
-    _profile_shows_hunt = _dev._profile_shows_hunt
-    fetch_user_info = _dev.fetch_user_info
-    fetch_user_infos = _dev.fetch_user_infos if hasattr(_dev, 'fetch_user_infos') else None
-    fetch_presences = _dev.fetch_presences
-    _get_followings = _dev._get_followings
-    _cookie_headers = _dev._cookie_headers
-    resolve_universe_id = _dev.resolve_universe_id if hasattr(_dev, 'resolve_universe_id') else lambda pid: 10766456501
-    resolve_game_name = _dev.resolve_game_name if hasattr(_dev, 'resolve_game_name') else lambda uid: "The Hunt: Roblox 20"
-    HAS_DEV=True
-except Exception as e:
-    print(f"Failed to import developer_scanner: {e}, using fallback", file=sys.stderr)
-    HAS_DEV=False
-    # Fallback minimal definitions (should not happen if file exists)
-    def _get_all_cookies():
-        pool=[]; seen=set()
-        for k in ["ROBLOX_COOKIE","ROBLOSECURITY","ROBLOSECURITY_1","ROBLOSECURITY_2","ROBLOSECURITY_3","ROBLOSECURITY_4","ROBLOSECURITY_5"]:
-            v=os.environ.get(k,"")
-            if v and v.strip():
-                v=v.strip().strip('"').strip("'")
-                if v.startswith(".ROBLOSECURITY="): v=v.split("=",1)[1]
-                if v and v not in seen:
-                    seen.add(v); pool.append((k,v))
-        return pool
-    def _log_cookie_status(): return False
-    def _get_my_id(h): return None
-    def _seeded_session(ck):
-        import requests as _rq
-        s=_rq.Session(); s.headers.update({"User-Agent":"Mozilla/5.0","Accept":"text/html"})
-        if ck: s.headers.update({"Cookie": ck})
-        try: s.get("https://www.roblox.com/home", timeout=10)
-        except: pass
-        return s
-    def fetch_user_info(uid):
-        try:
-            r=requests.get(f"https://users.roblox.com/v1/users/{uid}", timeout=10, headers={"User-Agent":"Mozilla/5.0"})
-            if r.status_code==200:
-                j=r.json(); return {"userId":j.get("id"),"username":j.get("name"),"displayName":j.get("displayName"),"hasVerifiedBadge":j.get("hasVerifiedBadge",False)}
-        except: pass
-        return {"userId":uid,"username":f"user{uid}","displayName":f"user{uid}","hasVerifiedBadge":False}
-    def fetch_user_infos(uids):
-        # fallback batched POST (same as developer_scanner) to avoid 429 flood
-        res={}
-        if not uids: return res
-        import random as _rand
-        seen=set(); uniq=[]
-        for u in uids:
-            if u not in seen:
-                seen.add(u); uniq.append(u)
-        headers={"User-Agent":"Mozilla/5.0","Content-Type":"application/json","Accept":"application/json"}
-        for s in range(0,len(uniq),100):
-            batch=uniq[s:s+100]
-            for attempt in range(1,6):
-                try:
-                    r=requests.post("https://users.roblox.com/v1/users", json={"userIds":batch}, timeout=15, headers=headers)
-                    if r.status_code==429:
-                        wait=r.headers.get("Retry-After")
-                        try: w=float(wait) if wait else (2**attempt)
-                        except: w=2**attempt
-                        time.sleep(w+_rand.uniform(0,1))
-                        continue
-                    if r.status_code==200:
-                        for e in r.json().get("data",[]):
-                            res[e["id"]]={"userId":e["id"],"username":e.get("name"),"displayName":e.get("displayName"),"hasVerifiedBadge":e.get("hasVerifiedBadge",False)}
-                        break
-                    else:
-                        time.sleep(1+attempt)
-                except: time.sleep(1+attempt)
-            for uid in batch:
-                if uid not in res:
-                    res[uid]={"userId":uid,"username":f"user{uid}","displayName":f"user{uid}","hasVerifiedBadge":False}
-            if s+100 < len(uniq):
-                time.sleep(0.4)
-        return res
-    def fetch_presences(uids):
-        return {}
-    def _get_followings(mid, hdr): return set()
-    def _cookie_headers(): return {"User-Agent":"Mozilla/5.0","Content-Type":"application/json"}
-    def _profile_shows_hunt(uid, hdr): return False
-    def resolve_universe_id(pid): return 10766456501
-    def resolve_game_name(uid): return "The Hunt: Roblox 20"
+# Helpers shared with developer_scanner. Imported directly on purpose: if this import
+# breaks we want the run to fail loudly, not silently produce empty presence data.
+from developer_scanner import (
+    _get_all_cookies,
+    _log_cookie_status,
+    _get_my_id,
+    _seeded_session,
+    _profile_shows_hunt,
+    _get_followings,
+    _cookie_headers,
+    fetch_user_info,
+    fetch_user_infos,
+    fetch_presences,
+    load_user_ids,
+    resolve_universe_id,
+    resolve_game_name,
+)
 
 DEFAULT_PLACE_ID = 74205509034203
 DEFAULT_UNIVERSE_ID = 10766456501
@@ -196,62 +118,13 @@ def fetch_group_members(group_id, max_members=None, delay=0.6, verbose=False):
 def load_tracker_config(tracker_id):
     p = Path("config/trackers.yaml")
     if not p.exists():
-        p = Path("config/trackers.json")
-        if p.exists():
-            data=json.loads(p.read_text())
-            for t in data.get("trackers",[]):
-                if t.get("id")==tracker_id:
-                    return t
-            print(f"Tracker {tracker_id} not found in {p}", file=sys.stderr)
-            return None
-    txt=p.read_text()
-    data=None
-    if HAS_YAML:
-        try:
-            data=yaml.safe_load(txt)
-        except Exception as e:
-            print(f"yaml load failed {e}", file=sys.stderr)
-            data=None
-    if data is None:
-        # manual minimal parse
-        try:
-            blocks=txt.split("- id:")
-            for block in blocks[1:]:
-                first_line=block.strip().splitlines()[0]
-                bid=first_line.strip().split()[0]
-                if bid==tracker_id:
-                    t={"id": bid}
-                    for line in block.splitlines()[1:]:
-                        line=line.strip()
-                        if not line or line.startswith("#"): continue
-                        if line.startswith("-") or "trackers:" in line or "settings:" in line:
-                            continue
-                        if ":" in line:
-                            k,v=line.split(":",1)
-                            k=k.strip(); v=v.strip().strip('"').strip("'")
-                            if v.startswith("[") and v.endswith("]"):
-                                inner=v[1:-1].strip()
-                                if inner:
-                                    t["extraIds"]=[int(x.strip()) for x in inner.split(",") if x.strip().isdigit()]
-                                else:
-                                    t["extraIds"]=[]
-                            elif v.isdigit():
-                                t[k]=int(v)
-                            elif k=="extraIds":
-                                pass
-                            else:
-                                if "#" in v:
-                                    v=v.split("#")[0].strip().strip('"').strip("'")
-                                t[k]=v
-                    return t
-        except Exception as e2:
-            print(f"manual parse failed {e2}", file=sys.stderr)
-        print(f"Tracker {tracker_id} not found (install pyyaml: pip install pyyaml)", file=sys.stderr)
+        print(f"{p} not found", file=sys.stderr)
         return None
-    for t in data.get("trackers",[]):
-        if t.get("id")==tracker_id:
+    data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    for t in data.get("trackers", []):
+        if t.get("id") == tracker_id:
             return t
-    print(f"Tracker {tracker_id} not found in config/trackers.yaml", file=sys.stderr)
+    print(f"Tracker {tracker_id} not found in {p}", file=sys.stderr)
     return None
 
 def parse_args():
@@ -319,27 +192,7 @@ def tracker_main_logic():
         all_members.extend(group_members)
     file_ids=[]
     if ids_file and Path(ids_file).exists():
-        try:
-            # try developer helper
-            if HAS_DEV and hasattr(_dev, 'load_user_ids'):
-                file_ids = _dev.load_user_ids(ids_file)
-            elif HAS_DEV and hasattr(_dev, 'load_ids'):
-                file_ids = _dev.load_ids(ids_file)
-            else:
-                raise Exception("no loader")
-        except:
-            file_ids=[]
-            for line in Path(ids_file).read_text().splitlines():
-                line=line.strip()
-                if not line or line.startswith("#"): continue
-                for part in line.replace(",", " ").split():
-                    if part.isdigit():
-                        file_ids.append(int(part))
-            seen=set(); uniq=[]
-            for i in file_ids:
-                if i not in seen:
-                    seen.add(i); uniq.append(i)
-            file_ids=uniq
+        file_ids = load_user_ids(ids_file)
         if args.max_members and len(file_ids) > args.max_members:
             file_ids=file_ids[:args.max_members]
         if verbose:
@@ -347,13 +200,11 @@ def tracker_main_logic():
         # Batched fetch fixes 429 flood: sequential GET 0.05s delay → 28/35 failed -> user(UserID)
         # Use POST /v1/users batch 100 with retry (developer_scanner.fetch_user_infos)
         if file_ids:
-            needed = [uid for uid in file_ids if not any(m["userId"]==uid for m in all_members)]
+            known = {m["userId"] for m in all_members}
+            needed = [uid for uid in file_ids if uid not in known]
             if needed:
                 try:
-                    if 'fetch_user_infos' in globals() and fetch_user_infos:
-                        infos = fetch_user_infos(needed)
-                    else:
-                        infos = {uid: fetch_user_info(uid) for uid in needed}
+                    infos = fetch_user_infos(needed)
                 except Exception as e:
                     print(f"batch fetch_user_infos failed {e}, falling back per-uid", file=sys.stderr)
                     infos = {}
@@ -367,13 +218,11 @@ def tracker_main_logic():
     if extra_ids:
         if verbose:
             print(f"Extra IDs: {extra_ids}", file=sys.stderr)
-        extra_needed = [uid for uid in extra_ids if not any(m["userId"]==uid for m in all_members)]
+        known = {m["userId"] for m in all_members}
+        extra_needed = [uid for uid in extra_ids if uid not in known]
         if extra_needed:
             try:
-                if 'fetch_user_infos' in globals() and fetch_user_infos:
-                    extra_infos = fetch_user_infos(extra_needed)
-                else:
-                    extra_infos = {uid: fetch_user_info(uid) for uid in extra_needed}
+                extra_infos = fetch_user_infos(extra_needed)
             except Exception as e:
                 print(f"batch extra_ids fetch failed {e}", file=sys.stderr)
                 extra_infos = {uid: fetch_user_info(uid) for uid in extra_needed}
@@ -405,15 +254,13 @@ def tracker_main_logic():
     else:
         members_for_presence=all_members
     # resolve universe
-    universe=args.universe_id or (resolve_universe_id(place_id) if HAS_DEV else DEFAULT_UNIVERSE_ID) or DEFAULT_UNIVERSE_ID
-    game_name=resolve_game_name(universe) if HAS_DEV else "The Hunt: Roblox 20"
+    universe=args.universe_id or resolve_universe_id(place_id) or DEFAULT_UNIVERSE_ID
+    game_name=resolve_game_name(universe)
     if game_name and verbose:
         print(f'Target game: "{game_name}" Universe {universe}', file=sys.stderr)
     ids_for_presence=[m["userId"] for m in members_for_presence]
-    # log cookie status (like dev does)
-    if HAS_DEV:
-        try: _log_cookie_status()
-        except: pass
+    try: _log_cookie_status()
+    except Exception as e: print(f"cookie status check failed: {type(e).__name__}", file=sys.stderr)
     presences=fetch_presences(ids_for_presence)
     print(f"Got {len(presences)}/{len(ids_for_presence)} presence responses", file=sys.stderr)
     # isFollowing pool
@@ -531,15 +378,7 @@ def tracker_main_logic():
     return 0
 
 def main():
-    # If --tracker or --group-id present use unified logic, else fallback to original dev main for backward compat
-    if any(x.startswith("--tracker") or x.startswith("--group-id") for x in sys.argv):
-        sys.exit(tracker_main_logic())
-    # else try original dev logic
-    if HAS_DEV and hasattr(_dev, 'main'):
-        # call original dev main (will parse its own args)
-        _dev.main()
-    else:
-        sys.exit(tracker_main_logic())
+    sys.exit(tracker_main_logic())
 
 if __name__ == "__main__":
     main()
