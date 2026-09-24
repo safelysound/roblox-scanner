@@ -43,6 +43,7 @@ from developer_scanner import (
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 PENDING_MAX_AGE = 600     # give up on an unsent alert after 10 minutes
 STATE_MAX_STALE = 900     # older than this the state is ignored (notifier was down) -> reseed silently
+SEED_MAX_WAIT = 180       # keep recording silently until one complete poll, but at most this long
 MEMBERS_TTL = 3600        # refresh a group's member list at most hourly
 WIDE_THRESHOLD = 150      # more users than this -> one rotating account sweeps, others only re-check hidden ones
 
@@ -61,6 +62,7 @@ class Account:
         self.csrf = None
         self.blocked_until = 0.0
         self.fails = 0
+        self.errors = 0     # total failed requests, lets poll() tell whether a sweep was complete
         self.dead = False
         self.sess = requests.Session()
         self.sess.headers.update({"User-Agent": UA, "Content-Type": "application/json",
@@ -75,6 +77,7 @@ class Account:
                 r = self.sess.post(PRESENCE_API, json={"userIds": ids}, headers=hdr, timeout=15)
             except requests.RequestException as e:
                 self.fails += 1
+                self.errors += 1
                 log(f"{self.key}: presence error {type(e).__name__}")
                 return None
             if r.status_code == 403 and r.headers.get("x-csrf-token"):
@@ -89,9 +92,11 @@ class Account:
                 except ValueError:
                     wait = 30.0
                 self.blocked_until = time.time() + wait
+                self.errors += 1
                 log(f"{self.key}: rate limited, pausing {wait:.0f}s")
                 return None
             self.fails += 1
+            self.errors += 1
             if r.status_code == 401 or self.fails >= 5:
                 self.dead = True
                 log(f"{self.key}: disabled for this run (HTTP {r.status_code})")
@@ -114,19 +119,20 @@ def _rank(p):
 
 
 def _sweep(acct, ids, best):
-    """Query one account for ids, merging into best. True if at least one batch worked."""
-    ok = False
+    """Query one account for ids, merging into best. -> how many ids (from the start of the list) were covered."""
+    covered = 0
     for i in range(0, len(ids), PRESENCE_BATCH_SIZE):
-        res = acct.presence(ids[i:i + PRESENCE_BATCH_SIZE])
+        batch = ids[i:i + PRESENCE_BATCH_SIZE]
+        res = acct.presence(batch)
         if res is None:
             break
-        ok = True
+        covered += len(batch)
         for p in res:
             uid = p.get("userId")
             if uid is not None and _rank(p) > _rank(best.get(uid)):
                 best[uid] = p
-        time.sleep(0.25)
-    return ok
+        time.sleep(0.4)
+    return covered
 
 
 def _hidden_in_game(p):
@@ -134,29 +140,43 @@ def _hidden_in_game(p):
 
 
 def poll(accounts, ids, poll_no=0):
-    """One presence sweep. -> (best record per user, any_success)."""
+    """One presence sweep. -> (best record per user, any_success, complete).
+
+    complete = every account answered every request it was asked, so the picture is not missing anyone
+    who is only visible through an account that failed (used to decide when seeding is trustworthy).
+    """
+    errors_before = sum(a.errors for a in accounts)
     usable = [a for a in accounts if not a.dead and time.time() >= a.blocked_until]
     best, ok = {}, False
     if not usable:
-        return best, ok
+        return best, ok, False
+    covered_all = True
     if len(ids) <= WIDE_THRESHOLD:
         for acct in usable:
-            ok = _sweep(acct, ids, best) or ok
-        return best, ok
-    # Wide mode: rotate the primary; fall through to the next account if it fails outright.
-    start = poll_no % len(usable)
-    order = usable[start:] + usable[:start]
-    primary = None
-    for acct in order:
-        if _sweep(acct, ids, best):
-            primary, ok = acct, True
-            break
-    if primary:
-        hidden = [u for u, p in best.items() if _hidden_in_game(p)]
+            ok = _sweep(acct, ids, best) > 0 or ok
+    else:
+        # Wide mode: a rotating primary sweeps everyone; if it is cut short (rate limit), the next account
+        # continues with the remainder. Then users who are in-game with a hidden location are re-checked
+        # through the remaining accounts.
+        start = poll_no % len(usable)
+        order = usable[start:] + usable[:start]
+        remaining, first = list(ids), None
         for acct in order:
-            if acct is not primary and not acct.dead and time.time() >= acct.blocked_until and hidden:
-                _sweep(acct, hidden, best)
-    return best, ok
+            if not remaining:
+                break
+            done = _sweep(acct, remaining, best)
+            if done:
+                first = first or acct
+                ok = True
+                remaining = remaining[done:]
+        covered_all = not remaining
+        if first:
+            hidden = [u for u, p in best.items() if _hidden_in_game(p)]
+            for acct in order:
+                if acct is not first and hidden and not acct.dead and time.time() >= acct.blocked_until:
+                    _sweep(acct, hidden, best)
+    complete = ok and covered_all and len(usable) == len(accounts) and sum(a.errors for a in accounts) == errors_before
+    return best, ok, complete
 
 
 def is_hunt(p, place_id, universe_id):
@@ -448,15 +468,17 @@ def main():
     sweep_secs = []
     while True:
         t0 = time.time()
-        best, ok = poll(accounts, ids, polls)
+        best, ok, complete = poll(accounts, ids, polls)
         polls += 1
         sweep_secs.append(time.time() - t0)
         if ok:
             good_polls += 1
             in_hunt = {u: p for u, p in best.items() if is_hunt(p, place_id, universe_id)}
             ready = detect(st, in_hunt, t0, seeded, args.grace, args.wait_for_job)
-            if not seeded:
-                log(f"seeded: {len(in_hunt)} already in The Hunt, not announcing")
+            if not seeded and (complete or t0 - start >= SEED_MAX_WAIT):
+                # Only trust the baseline once every account answered; otherwise people visible through a
+                # failed account would look like fresh joins when it recovers.
+                log(f"seeded: {len(in_hunt)} already in The Hunt, not announcing" + ("" if complete else " (incomplete after waiting)"))
                 seeded = True
             for uid in ready:
                 if uid not in names:
