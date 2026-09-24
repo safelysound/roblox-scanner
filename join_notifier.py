@@ -43,6 +43,7 @@ from developer_scanner import (
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 PENDING_MAX_AGE = 600     # give up on an unsent alert after 10 minutes
 STATE_MAX_STALE = 900     # older than this the state is ignored (notifier was down) -> reseed silently
+WIDE_PAUSE = 0.1          # wide sweeps rotate accounts, so consecutive requests hit different accounts
 SEED_MAX_WAIT = 180       # keep recording silently until one complete poll, but at most this long
 MEMBERS_TTL = 3600        # refresh a group's member list at most hourly
 WIDE_THRESHOLD = 150      # more users than this -> one rotating account sweeps, others only re-check hidden ones
@@ -118,7 +119,7 @@ def _rank(p):
     return r
 
 
-def _sweep(acct, ids, best):
+def _sweep(acct, ids, best, pause=0.4):
     """Query one account for ids, merging into best. -> how many ids (from the start of the list) were covered."""
     covered = 0
     for i in range(0, len(ids), PRESENCE_BATCH_SIZE):
@@ -131,7 +132,7 @@ def _sweep(acct, ids, best):
             uid = p.get("userId")
             if uid is not None and _rank(p) > _rank(best.get(uid)):
                 best[uid] = p
-        time.sleep(0.4)
+        time.sleep(pause)
     return covered
 
 
@@ -155,26 +156,32 @@ def poll(accounts, ids, poll_no=0):
         for acct in usable:
             ok = _sweep(acct, ids, best) > 0 or ok
     else:
-        # Wide mode: a rotating primary sweeps everyone; if it is cut short (rate limit), the next account
-        # continues with the remainder. Then users who are in-game with a hidden location are re-checked
-        # through the remaining accounts.
+        # Wide mode: batches are dealt round-robin across the accounts (rotating the starting account each
+        # poll), so no single account makes a burst of requests. A batch an account can't answer (rate
+        # limit) goes to the next account. Then users who are in-game with a hidden location are re-checked
+        # through the other accounts.
+        batches = [ids[i:i + PRESENCE_BATCH_SIZE] for i in range(0, len(ids), PRESENCE_BATCH_SIZE)]
         start = poll_no % len(usable)
-        order = usable[start:] + usable[:start]
-        remaining, first = list(ids), None
-        for acct in order:
-            if not remaining:
-                break
-            done = _sweep(acct, remaining, best)
-            if done:
-                first = first or acct
-                ok = True
-                remaining = remaining[done:]
-        covered_all = not remaining
-        if first:
-            hidden = [u for u, p in best.items() if _hidden_in_game(p)]
-            for acct in order:
-                if acct is not first and hidden and not acct.dead and time.time() >= acct.blocked_until:
-                    _sweep(acct, hidden, best)
+        answered_by = {}
+        for j, batch in enumerate(batches):
+            for k in range(len(usable)):
+                acct = usable[(start + j + k) % len(usable)]
+                if acct.dead or time.time() < acct.blocked_until:
+                    continue
+                if _sweep(acct, batch, best, pause=WIDE_PAUSE):
+                    ok = True
+                    for u in batch:
+                        answered_by[u] = acct
+                    break
+            else:
+                covered_all = False
+        hidden = [u for u, p in best.items() if _hidden_in_game(p)]
+        for acct in usable:
+            if acct.dead or time.time() < acct.blocked_until:
+                continue
+            todo = [u for u in hidden if answered_by.get(u) is not acct]
+            if todo:
+                _sweep(acct, todo, best, pause=WIDE_PAUSE)
     complete = ok and covered_all and len(usable) == len(accounts) and sum(a.errors for a in accounts) == errors_before
     return best, ok, complete
 

@@ -26,7 +26,7 @@ on:
         required: false
         default: ''
       notifier_mode:
-        description: 'Developer join notifier: live (normal), test (post one sample message), dry-run (poll 60s, post nothing)'
+        description: 'Developer join notifier: live (normal), test (post one sample message), dry-run (poll ~3 min, post nothing)'
         required: false
         default: 'live'
         type: choice
@@ -353,7 +353,7 @@ jobs:
           ARGS=()
           case "$MODE" in
             test)    ARGS+=(--test) ;;
-            dry-run) ARGS+=(--dry-run --duration 60) ;;
+            dry-run) ARGS+=(--dry-run --duration 200) ;;
           esac
           python join_notifier.py --notifier "$NOTIFIER" "${ARGS[@]}"
 
