@@ -24,18 +24,18 @@ python discord_updater.py roblox_scan_results.json --title "Admin Tracker" --dry
 
 Cookies are read from environment variables (see `cookies.example.txt`); without any, the scan still works but hidden presence stays hidden.
 
-## Developer join notifier
+## Join notifiers (Developers / Admins / Video Stars)
 
-`developer_notifier.py` posts to Discord within about a minute of a Developer joining The Hunt:
+`join_notifier.py` posts to Discord within about a minute of someone in a tracker joining The Hunt: an embed (title, colour, role ping and emoji per tracker, avatar thumbnail, relative timestamp, server ID in inline code) with a **Join ↗** button that opens the Roblox client on that exact server.
 
-> **A Developer joined The Hunt!** — `<emoji> [Display (username)](profile) has joined **The Hunt**!` plus the server link / job ID in a code block, with a role ping above it.
-
-- Runs as the `notify-developers` job in the workflow. Each cron dispatch polls presence every ~20s for ~4.5 minutes, right up to the next tick; who was already in The Hunt is carried between runs in a small state artifact.
-- Setup: add the Actions secret `DISCORD_WEBHOOK_DEVELOPER_JOINS` (use a different channel/webhook than the tracker embed). Role, emoji and code-block format (`link` / `id` / `both`) are under `notifiers:` in `config/trackers.yaml`.
-- Try it: *Run workflow* with `notifier_mode = test` (posts one `[TEST]` sample, no role ping) or `dry-run` (polls 60s, posts nothing).
-- Behavior: a Developer counts as *joined* if they weren't in The Hunt in the last 3 minutes (short flickers and server hops don't re-announce). The first run after downtime records who's already there without announcing. It waits up to 30s for the server ID to appear before posting.
-- Limits: the server ID is only visible to a pool account that can see that player's game (followed + join privacy allows it); otherwise the message says the server isn't visible. Developers whose game is hidden from every pool account can't be detected. Roblox's own presence lags by a few seconds to tens of seconds.
-- Run it continuously on your own machine instead: `python developer_notifier.py --duration 0`.
+- Runs as the `notify` job in the workflow, one per tracker in `notifiers:` of `config/trackers.yaml`. Each cron dispatch polls presence for ~4.5 minutes, right up to the next tick; who was already in The Hunt is carried between runs in a small state artifact.
+- Setup: the Actions secret named by `webhookSecret` (currently `DISCORD_WEBHOOK_DEVELOPER_JOINS` for all three; point any notifier at its own secret to use a different channel).
+- Try it: *Run workflow* with `notifier_mode = test` (posts a `[TEST]` sample per tracker, no role ping) or `dry-run` (polls 60s, posts nothing). The run's annotations show the result, e.g. whether Discord accepted the button.
+- **Join button:** Discord only opens `http(s)` links, so it is a link button to `https://www.roblox.com/games/start?placeId=…&gameInstanceId=…`, which launches Roblox (a `roblox://` link can't be clicked in Discord). Webhooks can't send interactive buttons (Discohook-style `custom_id` / `flow` buttons need a bot). If Discord ever drops the button, the message gets the same link as text.
+- **Detection:** *joined* = not in The Hunt in the last 3 minutes. The first run after downtime records who's already there without announcing. It waits up to 30s for the server ID to appear before posting.
+- **Limits:** the server ID (and the button) only exist when a pool account can see that player's game (followed + their join privacy allows it); otherwise the message says `server not visible`. People hidden from every pool account can't be detected. Roblox's own presence lags a few seconds to tens of seconds.
+- **Big groups (Admin, Video Stars):** one account, rotating each poll, sweeps the whole group; only users who are "in-game, location hidden" are re-checked through the other accounts. Someone who appears offline to everyone except their followers is found more slowly than in the Developer list, which queries every account. Group member lists are cached for an hour.
+- Run it continuously on your own machine instead: `python join_notifier.py --notifier developers --duration 0`.
 
 ## Config — add a tracker without touching the workflow
 
@@ -57,7 +57,7 @@ Manual run: *Actions → Trackers → Run workflow* (`tracker`, `place_id`, `max
 **Secrets** (Settings → Secrets and variables → Actions):
 
 - `ROBLOX_COOKIE`, `ROBLOSECURITY`, `ROBLOSECURITY_1` … `ROBLOSECURITY_5` — cookie pool (more cookies = more presence requests per minute)
-- `DISCORD_WEBHOOK` (Admin), `DISCORD_WEBHOOK_VIDEO_STARS`, `DISCORD_WEBHOOK_DEVELOPERS`, `DISCORD_WEBHOOK_DEVELOPER_JOINS` (join notifier)
+- `DISCORD_WEBHOOK` (Admin), `DISCORD_WEBHOOK_VIDEO_STARS`, `DISCORD_WEBHOOK_DEVELOPERS`, `DISCORD_WEBHOOK_DEVELOPER_JOINS` (join notifiers)
 
 ## Files
 
@@ -67,7 +67,7 @@ Manual run: *Actions → Trackers → Run workflow* (`tracker`, `place_id`, `max
 | `developer_scanner.py` | Presence / cookie / profile helpers used by `tracker_scanner.py` (must stay; can also run standalone) |
 | `merge_shards.py` | Merges `shard_*.json` into one results file |
 | `discord_updater.py` | Builds and edits the Discord embed (Hunt + Unknown only) |
-| `developer_notifier.py` | Real-time "a Developer joined The Hunt" Discord notifier |
+| `join_notifier.py` | Real-time "joined The Hunt" Discord notifier (Developers / Admins / Video Stars) |
 | `follow_unknown.py` | Follows accounts whose status shows as "Unknown" so the game becomes visible |
 | `config/trackers.yaml` | Tracker definitions (single source of truth) |
 | `config/developer_ids.txt` | Developer ID list |

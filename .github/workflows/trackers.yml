@@ -47,6 +47,7 @@ jobs:
       trackers: ${{ steps.plan.outputs.trackers }}
       scan: ${{ steps.plan.outputs.scan }}
       place_id: ${{ steps.plan.outputs.place_id }}
+      notify: ${{ steps.plan.outputs.notify }}
     steps:
       - uses: actions/checkout@v7
 
@@ -69,10 +70,14 @@ jobs:
           # One scan job per (tracker, shard)
           SCAN=$(jq -c '[.[] | . as $t | ($t.shards // 1) as $n | range(0; $n) as $s | {id: $t.id, shard: $s, shards: $n}]' <<< "$TRACKERS")
           PLACE_ID="${INPUT_PLACE_ID:-$(yq '.settings.targetPlaceId' config/trackers.yaml)}"
+          # Join notifiers (one per selected tracker that has a notifiers: entry)
+          NOTIFY=$(yq -o=json -I=0 '(.notifiers // {}) | to_entries | map(.value + {"id": .key})' config/trackers.yaml \
+                   | jq -c --argjson t "$TRACKERS" '[.[] | select(.id as $i | $t | map(.id) | index($i))]')
           {
             echo "trackers=$TRACKERS"
             echo "scan=$SCAN"
             echo "place_id=$PLACE_ID"
+            echo "notify=$NOTIFY"
           } >> "$GITHUB_OUTPUT"
           echo "Trackers: $(jq -r 'map(.id) | join(", ")' <<< "$TRACKERS") | scan jobs: $(jq length <<< "$SCAN") | place: $PLACE_ID"
 
@@ -286,20 +291,25 @@ jobs:
           python follow_unknown.py --tracker "$TRACKER" --json "$RESULTS"
 
   # ---------------------------------------------------------------------------
-  # Real-time "a Developer joined The Hunt" notifier (developer_notifier.py).
-  # Rides the external cron: each dispatch polls presence every ~20s for ~4.5 min, right up to the
-  # next tick. Not part of the tracker matrix, so a failure here never affects the embeds above.
+  # Real-time "someone joined The Hunt" notifiers (join_notifier.py), one job per tracker.
+  # Rides the external cron: each dispatch polls presence for ~4.5 min, right up to the next tick.
+  # Not part of the tracker matrix, so a failure here never affects the embeds above.
   # ---------------------------------------------------------------------------
-  notify-developers:
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.tracker == 'all' || inputs.tracker == 'developers') }}
+  notify:
+    needs: plan
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.plan.outputs.notify != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
     permissions:
       actions: read     # to fetch the previous run's state artifact
       contents: read
     concurrency:
-      group: developer-notifier
+      group: notifier-${{ matrix.id }}
       cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.notify) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -314,22 +324,24 @@ jobs:
         if: ${{ inputs.notifier_mode != 'test' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          NAME: notifier-state-${{ matrix.id }}
         run: |
           mkdir -p state
-          ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=developer-notifier-state&per_page=1" \
+          ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=1" \
                  --jq '[.artifacts[] | select(.expired == false)][0].id // empty')
           if [ -n "$ID" ]; then
             gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ID/zip" > state.zip \
               && unzip -o -q state.zip -d state \
-              || echo "::warning::could not load previous state; developers already in The Hunt won't be announced"
+              || echo "::warning::could not load previous state; people already in The Hunt won't be announced"
           else
             echo "No previous state (first run): current Hunt players will be recorded silently"
           fi
 
-      - name: Watch for Developers joining The Hunt
+      - name: Watch ${{ matrix.id }} joining The Hunt
         env:
           MODE: ${{ inputs.notifier_mode }}
-          DISCORD_WEBHOOK_DEVELOPER_JOINS: ${{ secrets.DISCORD_WEBHOOK_DEVELOPER_JOINS }}
+          NOTIFIER: ${{ matrix.id }}
+          WEBHOOK: ${{ secrets[matrix.webhookSecret] }}
           ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
           ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
           ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
@@ -343,13 +355,13 @@ jobs:
             test)    ARGS+=(--test) ;;
             dry-run) ARGS+=(--dry-run --duration 60) ;;
           esac
-          python developer_notifier.py "${ARGS[@]}"
+          python join_notifier.py --notifier "$NOTIFIER" "${ARGS[@]}"
 
       - name: Save notifier state
         if: ${{ always() && inputs.notifier_mode != 'test' }}
         uses: actions/upload-artifact@v7
         with:
-          name: developer-notifier-state
-          path: state/developer_notifier.json
+          name: notifier-state-${{ matrix.id }}
+          path: state/notifier_${{ matrix.id }}.json
           retention-days: 1
           if-no-files-found: ignore

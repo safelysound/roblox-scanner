@@ -47,19 +47,41 @@ trackers:
     resultsFile: roblox_scan_results_developers.json
     messageIdFile: .github/discord_message_id_developers.txt
 
-# Real-time "joined The Hunt" notifiers (see developer_notifier.py)
-#   tracker        which tracker's idsFile to watch
-#   webhookSecret  Actions secret with the Discord webhook URL (a separate channel from the tracker embed)
+# Real-time "joined The Hunt" notifiers (join_notifier.py). One per tracker; the key is the tracker id.
+#   title          embed title
+#   color          embed color (hex)
 #   roleId         role to ping (omit for no ping)
 #   emoji          emoji before the name
-#   serverFormat   what goes in the code block: link | id | both
+#   webhookSecret  Actions secret holding the Discord webhook URL (they can all share one, or use separate channels)
+#   interval       seconds between presence sweeps (big groups take a while per sweep)
+#   thumbnail      avatar (default) or none
 notifiers:
-  developer-joins:
+  developers:
     tracker: developers
-    webhookSecret: DISCORD_WEBHOOK_DEVELOPER_JOINS
+    title: "A Developer has joined The Hunt: Roblox 20!"
+    color: "#000000"
     roleId: "1552512715443146805"
-    emoji: "<:developer:1551388816324169838>"
-    serverFormat: both
+    emoji: "<:roblox:1551329066337050754>"
+    webhookSecret: DISCORD_WEBHOOK_DEVELOPER_JOINS
+    interval: 20
+
+  admin:
+    tracker: admin
+    title: "An Admin has joined The Hunt: Roblox 20!"
+    color: "#E74C3C"
+    roleId: "1552548764021956748"
+    emoji: "<:roblox:1551329066337050754>"
+    webhookSecret: DISCORD_WEBHOOK_DEVELOPER_JOINS
+    interval: 30
+
+  video-stars:
+    tracker: video-stars
+    title: "A Video Star has joined The Hunt: Roblox 20!"
+    color: "#F1C40F"
+    roleId: "1552548815268221009"
+    emoji: "<:verified:1551329029783691334>"
+    webhookSecret: DISCORD_WEBHOOK_DEVELOPER_JOINS
+    interval: 30
 
 settings:
   targetPlaceId: 74205509034203
