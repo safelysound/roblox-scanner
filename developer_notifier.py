@@ -38,7 +38,7 @@ from developer_scanner import (
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 PENDING_MAX_AGE = 600     # give up on an unsent alert after 10 minutes
-STATE_MAX_STALE = 900     # state older than this is ignored (notifier was down) -> reseed silently
+STATE_MAX_STALE = 900     # older than this the state is ignored (notifier was down) -> reseed silently
 
 
 def log(*a):
@@ -152,6 +152,10 @@ def load_state(path):
     if time.time() - st.get("updated", 0) > STATE_MAX_STALE:
         log("state is stale, reseeding without announcements")
         return fresh_state(), False
+    # Trusted state: everyone recorded as in The Hunt is assumed to still be there. Without this, a gap
+    # between runs longer than the grace window would make all of them look like fresh joins.
+    now = time.time()
+    st["hunt"] = {uid: now for uid in st["hunt"]}
     return st, True
 
 
