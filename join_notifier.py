@@ -64,6 +64,8 @@ class Account:
         self.blocked_until = 0.0
         self.fails = 0
         self.errors = 0     # total failed requests, lets poll() tell whether a sweep was complete
+        self.requests = 0
+        self.limited = []   # retry-after values of the 429s this account got
         self.dead = False
         self.sess = requests.Session()
         self.sess.headers.update({"User-Agent": UA, "Content-Type": "application/json",
@@ -74,6 +76,7 @@ class Account:
         """Presence dicts for ids, or None if the request failed."""
         for _ in range(2):  # second try after a CSRF refresh
             hdr = {"x-csrf-token": self.csrf} if self.csrf else {}
+            self.requests += 1
             try:
                 r = self.sess.post(PRESENCE_API, json={"userIds": ids}, headers=hdr, timeout=15)
             except requests.RequestException as e:
@@ -93,6 +96,7 @@ class Account:
                 except ValueError:
                     wait = 30.0
                 self.blocked_until = time.time() + wait
+                self.limited.append(wait)
                 self.errors += 1
                 log(f"{self.key}: rate limited, pausing {wait:.0f}s")
                 return None
@@ -507,11 +511,15 @@ def main():
             break
         time.sleep(max(0.0, interval - (time.time() - t0)))
 
-    limited = sum(1 for a in accounts if a.blocked_until > start)
+    limited = sum(1 for a in accounts if a.limited)
     dead = sum(1 for a in accounts if a.dead)
+    total_req = sum(a.requests for a in accounts)
+    n429 = sum(len(a.limited) for a in accounts)
+    waits = sorted(w for a in accounts for w in a.limited)
     print(f"::notice title=notifier {args.notifier}::{good_polls}/{polls} polls ok, {sent} announcement(s), "
           f"{len(st['hunt'])} in The Hunt, {len(ids)} watched, avg sweep {sum(sweep_secs)/len(sweep_secs):.0f}s, "
-          f"rate-limited accounts {limited}, disabled accounts {dead}")
+          f"rate-limited accounts {limited}, disabled accounts {dead} | presence requests {total_req} in {time.time()-start:.0f}s, "
+          f"429s {n429}, retry-after {waits[0] if waits else '-'}..{waits[-1] if waits else '-'}s")
     return 0 if good_polls else 1
 
 
