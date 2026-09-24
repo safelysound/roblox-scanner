@@ -52,7 +52,7 @@ trackers:
 #   color          embed color (hex)
 #   roleId         role to ping (omit for no ping)
 #   emoji          emoji before the name
-#   webhookSecret  Actions secret holding the Discord webhook URL (they can all share one, or use separate channels)
+#   webhookSecret  Actions secret holding this notifier's Discord webhook URL
 #   interval       seconds between presence sweeps (big groups take a while per sweep)
 #   thumbnail      avatar (default) or none
 notifiers:
@@ -71,7 +71,7 @@ notifiers:
     color: "#E74C3C"
     roleId: "1552548764021956748"
     emoji: "<:roblox:1551329066337050754>"
-    webhookSecret: DISCORD_WEBHOOK_DEVELOPER_JOINS
+    webhookSecret: DISCORD_WEBHOOK_ADMIN_JOINS
     interval: 45
 
   video-stars:
@@ -80,7 +80,7 @@ notifiers:
     color: "#F1C40F"
     roleId: "1552548815268221009"
     emoji: "<:verified:1551329029783691334>"
-    webhookSecret: DISCORD_WEBHOOK_DEVELOPER_JOINS
+    webhookSecret: DISCORD_WEBHOOK_VIDEO_STAR_JOINS
     interval: 30
 
 settings:

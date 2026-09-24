@@ -22,6 +22,7 @@ var named by webhookSecret).
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -289,9 +290,15 @@ def detect(st, in_hunt, now, seeded, grace, wait_for_job):
 # ---------------------------------------------------------------- Discord
 
 def md_escape(s):
-    for ch in "\\[]*_~`|>":
+    """Make a name safe inside a Discord masked-link label.
+
+    Discord shows a backslash literally inside link text, so only escape what would really break
+    formatting. An underscore between two letters/digits (Citizen_404) never triggers italics/underline
+    and stays as is; one at the start/end, next to a space or punctuation, or doubled gets escaped.
+    """
+    for ch in "\\[]*~`|":
         s = s.replace(ch, "\\" + ch)
-    return s
+    return re.sub(r"(?<![^\W_])_|_(?![^\W_])", r"\\_", s)
 
 
 def join_url(p):
