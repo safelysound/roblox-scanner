@@ -25,6 +25,12 @@ on:
         description: 'Limit members for testing (empty = all)'
         required: false
         default: ''
+      notifier_mode:
+        description: 'Developer join notifier: live (normal), test (post one sample message), dry-run (poll 60s, post nothing)'
+        required: false
+        default: 'live'
+        type: choice
+        options: ['live', 'test', 'dry-run']
 
 # Least privilege by default; only the merge job needs to push (Discord message-id commits).
 permissions:
@@ -278,3 +284,72 @@ jobs:
           fi
           # Exit code 2 = some follows failed; not fatal for the workflow
           python follow_unknown.py --tracker "$TRACKER" --json "$RESULTS"
+
+  # ---------------------------------------------------------------------------
+  # Real-time "a Developer joined The Hunt" notifier (developer_notifier.py).
+  # Rides the external cron: each dispatch polls presence every ~20s for ~4.5 min, right up to the
+  # next tick. Not part of the tracker matrix, so a failure here never affects the embeds above.
+  # ---------------------------------------------------------------------------
+  notify-developers:
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.tracker == 'all' || inputs.tracker == 'developers') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      actions: read     # to fetch the previous run's state artifact
+      contents: read
+    concurrency:
+      group: developer-notifier
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Load previous notifier state
+        if: ${{ inputs.notifier_mode != 'test' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p state
+          ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=developer-notifier-state&per_page=1" \
+                 --jq '[.artifacts[] | select(.expired == false)][0].id // empty')
+          if [ -n "$ID" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ID/zip" > state.zip \
+              && unzip -o -q state.zip -d state \
+              || echo "::warning::could not load previous state; developers already in The Hunt won't be announced"
+          else
+            echo "No previous state (first run): current Hunt players will be recorded silently"
+          fi
+
+      - name: Watch for Developers joining The Hunt
+        env:
+          MODE: ${{ inputs.notifier_mode }}
+          DISCORD_WEBHOOK_DEVELOPER_JOINS: ${{ secrets.DISCORD_WEBHOOK_DEVELOPER_JOINS }}
+          ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
+          ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
+          ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
+          ROBLOSECURITY_2: ${{ secrets.ROBLOSECURITY_2 }}
+          ROBLOSECURITY_3: ${{ secrets.ROBLOSECURITY_3 }}
+          ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
+          ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
+        run: |
+          ARGS=()
+          case "$MODE" in
+            test)    ARGS+=(--test) ;;
+            dry-run) ARGS+=(--dry-run --duration 60) ;;
+          esac
+          python developer_notifier.py "${ARGS[@]}"
+
+      - name: Save notifier state
+        if: ${{ always() && inputs.notifier_mode != 'test' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: developer-notifier-state
+          path: state/developer_notifier.json
+          retention-days: 1
+          if-no-files-found: ignore

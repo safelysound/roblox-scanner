@@ -24,6 +24,19 @@ python discord_updater.py roblox_scan_results.json --title "Admin Tracker" --dry
 
 Cookies are read from environment variables (see `cookies.example.txt`); without any, the scan still works but hidden presence stays hidden.
 
+## Developer join notifier
+
+`developer_notifier.py` posts to Discord within about a minute of a Developer joining The Hunt:
+
+> **A Developer joined The Hunt!** — `<emoji> [Display (username)](profile) has joined **The Hunt**!` plus the server link / job ID in a code block, with a role ping above it.
+
+- Runs as the `notify-developers` job in the workflow. Each cron dispatch polls presence every ~20s for ~4.5 minutes, right up to the next tick; who was already in The Hunt is carried between runs in a small state artifact.
+- Setup: add the Actions secret `DISCORD_WEBHOOK_DEVELOPER_JOINS` (use a different channel/webhook than the tracker embed). Role, emoji and code-block format (`link` / `id` / `both`) are under `notifiers:` in `config/trackers.yaml`.
+- Try it: *Run workflow* with `notifier_mode = test` (posts one `[TEST]` sample, no role ping) or `dry-run` (polls 60s, posts nothing).
+- Behavior: a Developer counts as *joined* if they weren't in The Hunt in the last 3 minutes (short flickers and server hops don't re-announce). The first run after downtime records who's already there without announcing. It waits up to 30s for the server ID to appear before posting.
+- Limits: the server ID is only visible to a pool account that can see that player's game (followed + join privacy allows it); otherwise the message says the server isn't visible. Developers whose game is hidden from every pool account can't be detected. Roblox's own presence lags by a few seconds to tens of seconds.
+- Run it continuously on your own machine instead: `python developer_notifier.py --duration 0`.
+
 ## Config — add a tracker without touching the workflow
 
 Everything lives in [`config/trackers.yaml`](config/trackers.yaml): group ID and/or ID file, extra IDs, shard count, embed title/colour/emoji, webhook secret name, results file and message-id file. The workflow builds its job matrix from that file, so a new tracker is one YAML block plus its webhook secret. (For *manual* runs, also add the id to the `tracker` choice list in the workflow.)
@@ -44,7 +57,7 @@ Manual run: *Actions → Trackers → Run workflow* (`tracker`, `place_id`, `max
 **Secrets** (Settings → Secrets and variables → Actions):
 
 - `ROBLOX_COOKIE`, `ROBLOSECURITY`, `ROBLOSECURITY_1` … `ROBLOSECURITY_5` — cookie pool (more cookies = more presence requests per minute)
-- `DISCORD_WEBHOOK` (Admin), `DISCORD_WEBHOOK_VIDEO_STARS`, `DISCORD_WEBHOOK_DEVELOPERS`
+- `DISCORD_WEBHOOK` (Admin), `DISCORD_WEBHOOK_VIDEO_STARS`, `DISCORD_WEBHOOK_DEVELOPERS`, `DISCORD_WEBHOOK_DEVELOPER_JOINS` (join notifier)
 
 ## Files
 
@@ -54,6 +67,7 @@ Manual run: *Actions → Trackers → Run workflow* (`tracker`, `place_id`, `max
 | `developer_scanner.py` | Presence / cookie / profile helpers used by `tracker_scanner.py` (must stay; can also run standalone) |
 | `merge_shards.py` | Merges `shard_*.json` into one results file |
 | `discord_updater.py` | Builds and edits the Discord embed (Hunt + Unknown only) |
+| `developer_notifier.py` | Real-time "a Developer joined The Hunt" Discord notifier |
 | `follow_unknown.py` | Follows accounts whose status shows as "Unknown" so the game becomes visible |
 | `config/trackers.yaml` | Tracker definitions (single source of truth) |
 | `config/developer_ids.txt` | Developer ID list |

@@ -47,6 +47,20 @@ trackers:
     resultsFile: roblox_scan_results_developers.json
     messageIdFile: .github/discord_message_id_developers.txt
 
+# Real-time "joined The Hunt" notifiers (see developer_notifier.py)
+#   tracker        which tracker's idsFile to watch
+#   webhookSecret  Actions secret with the Discord webhook URL (a separate channel from the tracker embed)
+#   roleId         role to ping (omit for no ping)
+#   emoji          emoji before the name
+#   serverFormat   what goes in the code block: link | id | both
+notifiers:
+  developer-joins:
+    tracker: developers
+    webhookSecret: DISCORD_WEBHOOK_DEVELOPER_JOINS
+    roleId: "1552512715443146805"
+    emoji: "<:developer:1551388816324169838>"
+    serverFormat: both
+
 settings:
   targetPlaceId: 74205509034203
   targetUniverseId: 10766456501
