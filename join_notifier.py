@@ -43,7 +43,7 @@ from developer_scanner import (
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 PENDING_MAX_AGE = 600     # give up on an unsent alert after 10 minutes
 STATE_MAX_STALE = 900     # older than this the state is ignored (notifier was down) -> reseed silently
-WIDE_PAUSE = 0.1          # wide sweeps rotate accounts, so consecutive requests hit different accounts
+WIDE_PAUSE = 0.5          # ~2 requests/s overall: Roblox 429s (retry-after 5s) at ~8/s even when spread over accounts
 SEED_MAX_WAIT = 180       # keep recording silently until one complete poll, but at most this long
 MEMBERS_TTL = 3600        # refresh a group's member list at most hourly
 WIDE_THRESHOLD = 150      # more users than this -> one rotating account sweeps, others only re-check hidden ones
