@@ -304,7 +304,7 @@ jobs:
       actions: read     # to fetch the previous run's state artifact
       contents: read
     concurrency:
-      group: notifier-${{ matrix.id }}
+      group: notifier-${{ matrix.id }}-${{ github.ref }}   # per ref: a test run on a branch never queues behind or cancels a live tick
       cancel-in-progress: false
     strategy:
       fail-fast: false
@@ -358,7 +358,8 @@ jobs:
           python join_notifier.py --notifier "$NOTIFIER" "${ARGS[@]}"
 
       - name: Save notifier state
-        if: ${{ always() && inputs.notifier_mode != 'test' }}
+        # dry-run/test must not write state: a dry-run "announces" to stdout and would consume a real join
+        if: ${{ always() && inputs.notifier_mode == 'live' }}
         uses: actions/upload-artifact@v7
         with:
           name: notifier-state-${{ matrix.id }}

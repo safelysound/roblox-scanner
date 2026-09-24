@@ -44,6 +44,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 PENDING_MAX_AGE = 600     # give up on an unsent alert after 10 minutes
 STATE_MAX_STALE = 900     # older than this the state is ignored (notifier was down) -> reseed silently
 WIDE_PAUSE = 0.5          # ~2 requests/s overall: Roblox 429s (retry-after 5s) at ~8/s even when spread over accounts
+PAUSE_MAX_WAIT = 8        # if every account is paused by a short 429, wait up to this long instead of failing the poll
 SEED_MAX_WAIT = 180       # keep recording silently until one complete poll, but at most this long
 MEMBERS_TTL = 3600        # refresh a group's member list at most hourly
 WIDE_THRESHOLD = 150      # more users than this -> one rotating account sweeps, others only re-check hidden ones
@@ -140,6 +141,22 @@ def _sweep(acct, ids, best, pause=0.4):
     return covered
 
 
+def _wait_for_capacity(accounts):
+    """Every live account is paused by a 429 (retry-after is ~5s): sleep until the earliest resumes.
+    -> True if something is usable now, False if there is nothing to wait for or it would take too long."""
+    live = [a for a in accounts if not a.dead]
+    if not live:
+        return False
+    now = time.time()
+    soonest = min(a.blocked_until for a in live)
+    if soonest <= now:
+        return True
+    if soonest - now > PAUSE_MAX_WAIT:
+        return False
+    time.sleep(soonest - now + 0.1)
+    return True
+
+
 def _hidden_in_game(p):
     return p.get("userPresenceType") == 2 and not (p.get("placeId") or p.get("rootPlaceId") or p.get("universeId"))
 
@@ -152,9 +169,12 @@ def poll(accounts, ids, poll_no=0):
     """
     errors_before = sum(a.errors for a in accounts)
     usable = [a for a in accounts if not a.dead and time.time() >= a.blocked_until]
+    if not usable and _wait_for_capacity(accounts):
+        usable = [a for a in accounts if not a.dead and time.time() >= a.blocked_until]
     best, ok = {}, False
     if not usable:
         return best, ok, False
+    live = [a for a in accounts if not a.dead]
     covered_all = True
     if len(ids) <= WIDE_THRESHOLD:
         for acct in usable:
@@ -162,25 +182,33 @@ def poll(accounts, ids, poll_no=0):
     else:
         # Wide mode: batches are dealt round-robin across the accounts (rotating the starting account each
         # poll), so no single account makes a burst of requests. A batch an account can't answer (rate
-        # limit) goes to the next account. Then users who are in-game with a hidden location are re-checked
-        # through the other accounts.
+        # limit) goes to the next account; if all are paused, wait out the short pause and retry. Then users
+        # who are in-game with a hidden location are re-checked through the other accounts.
         batches = [ids[i:i + PRESENCE_BATCH_SIZE] for i in range(0, len(ids), PRESENCE_BATCH_SIZE)]
-        start = poll_no % len(usable)
+        start = poll_no % len(live)
         answered_by = {}
+        waits = 0
         for j, batch in enumerate(batches):
-            for k in range(len(usable)):
-                acct = usable[(start + j + k) % len(usable)]
-                if acct.dead or time.time() < acct.blocked_until:
-                    continue
-                if _sweep(acct, batch, best, pause=WIDE_PAUSE):
-                    ok = True
-                    for u in batch:
-                        answered_by[u] = acct
+            while True:
+                done = False
+                for k in range(len(live)):
+                    acct = live[(start + j + k) % len(live)]
+                    if acct.dead or time.time() < acct.blocked_until:
+                        continue
+                    if _sweep(acct, batch, best, pause=WIDE_PAUSE):
+                        ok = done = True
+                        for u in batch:
+                            answered_by[u] = acct
+                        break
+                if done:
                     break
-            else:
+                if waits < 4 and _wait_for_capacity(live):
+                    waits += 1
+                    continue
                 covered_all = False
+                break
         hidden = [u for u, p in best.items() if _hidden_in_game(p)]
-        for acct in usable:
+        for acct in live:
             if acct.dead or time.time() < acct.blocked_until:
                 continue
             todo = [u for u in hidden if answered_by.get(u) is not acct]
