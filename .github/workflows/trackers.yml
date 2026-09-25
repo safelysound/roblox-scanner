@@ -287,8 +287,10 @@ jobs:
             echo "No $RESULTS, skipping follow"
             exit 0
           fi
-          # Exit code 2 = some follows failed; not fatal for the workflow
-          python follow_unknown.py --tracker "$TRACKER" --json "$RESULTS"
+          # Exit code 2 = some follows failed; not fatal for the workflow.
+          # 200s budget: the job (started after scan+merge) then ends before the next 5-min tick's follow job
+          # starts, so follow jobs no longer queue behind each other and get cancelled.
+          python follow_unknown.py --tracker "$TRACKER" --json "$RESULTS" --max-seconds 200
 
   # ---------------------------------------------------------------------------
   # Real-time "someone joined The Hunt" notifiers (join_notifier.py), one job per tracker.

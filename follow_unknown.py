@@ -17,8 +17,9 @@ Runs in background on GitHub Actions after embed update, no device needed.
 
 Failure handling (pacing above is unchanged):
   - a user is skipped after MAX_TRIES_PER_USER failed attempts (challenge / error / other failure)
-  - the run stops early when 2 x pool-size attempts in a row fail (everything is being blocked; stop
-    instead of hammering Roblox and risking the accounts)
+  - the run stops early when 2 x pool-size attempts in a row fail, or when Roblox answers 429 that
+    many times in a row (everything is blocked / rate limited; stop instead of hammering Roblox and
+    risking the accounts, the next run picks up where this one left off)
   - the run stops gracefully after --max-seconds (default 600)
 
 Exit 0 if all followed or none, 2 if some failed / were not attempted.
@@ -180,6 +181,7 @@ def main():
     stats=Counter()
     tries={}            # uid -> failed attempts so far
     consec_fail=0       # failed attempts in a row, across users/accounts
+    consec_429=0        # 429 rate-limit answers in a row
     abort_after=2*len(pool)
     stop_reason=""
     # Round-robin, 2 follows per account then a 30s cooldown for that account
@@ -224,6 +226,7 @@ def main():
             print(f"  -> {status} {code}", file=sys.stderr)
             followed.add(uid)
             consec_fail=0
+            consec_429=0
             avail["follows"]+=1
             if avail["follows"] >= 2:
                 avail["cooldown_until"]=time.time()+30
@@ -234,7 +237,11 @@ def main():
             continue
         if status=="retry":
             wait=code
+            consec_429+=1
             print(f"  -> 429 retry {wait}s {msg[:120]}", file=sys.stderr)
+            if consec_429 >= abort_after:
+                stop_reason=f"{consec_429} rate-limit (429) answers in a row; backing off until the next run"
+                break
             # treat as cooldown for this account
             avail["cooldown_until"]=time.time()+ max(wait,30)
             avail["follows"]=0

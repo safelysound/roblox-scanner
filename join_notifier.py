@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import requests
@@ -162,7 +163,7 @@ def _hidden_in_game(p):
     return p.get("userPresenceType") == 2 and not (p.get("placeId") or p.get("rootPlaceId") or p.get("universeId"))
 
 
-def poll(accounts, ids, poll_no=0):
+def poll(accounts, ids, poll_no=0, stats=None):
     """One presence sweep. -> (best record per user, any_success, complete).
 
     complete = every account answered every request it was asked, so the picture is not missing anyone
@@ -209,12 +210,20 @@ def poll(accounts, ids, poll_no=0):
                 covered_all = False
                 break
         hidden = [u for u, p in best.items() if _hidden_in_game(p)]
-        for acct in live:
-            if acct.dead or time.time() < acct.blocked_until:
-                continue
-            todo = [u for u in hidden if answered_by.get(u) is not acct]
-            if todo:
-                _sweep(acct, todo, best, pause=WIDE_PAUSE)
+        if stats is not None:
+            stats["hidden"] += len(hidden)
+        # Re-check the hidden ones through every other account, INTERLEAVED: one chunk at a time, each chunk
+        # walking the accounts in rotation. (Sending an account its whole list back-to-back made bursts of
+        # requests to a single account, which Roblox rate-limited.)
+        for c, i in enumerate(range(0, len(hidden), PRESENCE_BATCH_SIZE)):
+            chunk = hidden[i:i + PRESENCE_BATCH_SIZE]
+            for k in range(len(live)):
+                acct = live[(start + c + k) % len(live)]
+                if acct.dead or time.time() < acct.blocked_until:
+                    continue
+                todo = [u for u in chunk if answered_by.get(u) is not acct]
+                if todo:
+                    _sweep(acct, todo, best, pause=WIDE_PAUSE)
     complete = ok and covered_all and len(usable) == len(accounts) and sum(a.errors for a in accounts) == errors_before
     return best, ok, complete
 
@@ -512,9 +521,10 @@ def main():
     start = time.time()
     polls = good_polls = sent = 0
     sweep_secs = []
+    pstats = Counter()
     while True:
         t0 = time.time()
-        best, ok, complete = poll(accounts, ids, polls)
+        best, ok, complete = poll(accounts, ids, polls, pstats)
         polls += 1
         sweep_secs.append(time.time() - t0)
         if ok:
@@ -552,7 +562,7 @@ def main():
     n429 = sum(len(a.limited) for a in accounts)
     waits = sorted(w for a in accounts for w in a.limited)
     print(f"::notice title=notifier {args.notifier}::{good_polls}/{polls} polls ok, {sent} announcement(s), "
-          f"{len(st['hunt'])} in The Hunt, {len(ids)} watched, avg sweep {sum(sweep_secs)/len(sweep_secs):.0f}s, "
+          f"{len(st['hunt'])} in The Hunt, {len(ids)} watched, avg hidden {pstats['hidden'] / max(1, polls):.0f}, avg sweep {sum(sweep_secs)/len(sweep_secs):.0f}s, "
           f"rate-limited accounts {limited}, disabled accounts {dead} | presence requests {total_req} in {time.time()-start:.0f}s, "
           f"429s {n429}, retry-after {waits[0] if waits else '-'}..{waits[-1] if waits else '-'}s")
     return 0 if good_polls else 1

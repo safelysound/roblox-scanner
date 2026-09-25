@@ -72,7 +72,7 @@ notifiers:
     roleId: "1552548764021956748"
     emoji: "<:roblox:1551329066337050754>"
     webhookSecret: DISCORD_WEBHOOK_ADMIN_JOINS
-    interval: 45
+    interval: 60
 
   video-stars:
     tracker: video-stars
