@@ -329,8 +329,13 @@ jobs:
           NAME: notifier-state-${{ matrix.id }}
         run: |
           mkdir -p state
-          ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=1" \
-                 --jq '[.artifacts[] | select(.expired == false)][0].id // empty')
+          # per_page=1 trusted the API's own ordering, which is NOT reliably created_at-desc (verified: over
+          # half of a 100-artifact sample were 2+ positions out of true chronological order, drift up to 7
+          # positions). That could load a stale snapshot from several ticks back -- specifically, the exact
+          # snapshot from just before an announcement -- causing the same join to be announced again once
+          # it resurfaced. Fetch a page and sort by created_at ourselves instead of trusting return order.
+          ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=10" \
+                 --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id // empty')
           if [ -n "$ID" ]; then
             gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ID/zip" > state.zip \
               && unzip -o -q state.zip -d state \
