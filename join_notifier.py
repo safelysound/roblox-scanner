@@ -310,13 +310,25 @@ def md_escape(s):
     return re.sub(r"(?<![^\W_])_|_(?![^\W_])", r"\\_", s)
 
 
+JOIN_REDIRECT_BASE = "https://hunt-join.pages.dev/"
+
+
 def join_url(p):
-    """https URL that makes the Roblox client join this exact server (Discord can't open roblox:// links)."""
+    """https URL for the Join button.
+
+    Discord buttons can only open http(s) links, not roblox://, so this points at a small redirector
+    page (JOIN_REDIRECT_BASE) that immediately hands off to roblox://experiences/start?placeId=...
+    &gameInstanceId=..., the client's own native join route. That's a different, more direct mechanism
+    than linking straight to https://www.roblox.com/games/start?... (the old value here), which goes
+    through a web/JS intermediary that in practice did not reliably honor gameInstanceId on desktop.
+    Confirmed working against a real server on 2026-09-26; the redirector page also carries its own
+    fallback to the old web link, so nothing here needs a second fallback.
+    """
     job = (p or {}).get("gameId")
     place = (p or {}).get("placeId") or (p or {}).get("rootPlaceId")
     if not job or not place:
         return None
-    return f"https://www.roblox.com/games/start?placeId={place}&gameInstanceId={job}"
+    return f"{JOIN_REDIRECT_BASE}?placeId={place}&gameInstanceId={job}"
 
 
 def avatar_url(uid):
