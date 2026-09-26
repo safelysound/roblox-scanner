@@ -240,7 +240,7 @@ def is_hunt(p, place_id, universe_id):
 # ---------------------------------------------------------------- state / join detection
 
 def fresh_state():
-    return {"hunt": {}, "pending": {}, "updated": 0, "members": [], "members_ts": 0}
+    return {"hunt": {}, "pending": {}, "last_job": {}, "updated": 0, "members": [], "members_ts": 0}
 
 
 def load_state(path):
@@ -249,6 +249,7 @@ def load_state(path):
         st = json.loads(Path(path).read_text(encoding="utf-8"))
         st["hunt"] = {int(k): float(v) for k, v in st.get("hunt", {}).items()}
         st["pending"] = {int(k): float(v) for k, v in st.get("pending", {}).items()}
+        st["last_job"] = {int(k): v for k, v in st.get("last_job", {}).items()}
         st.setdefault("members", [])
         st.setdefault("members_ts", 0)
     except (OSError, ValueError):
@@ -275,24 +276,37 @@ def detect(st, in_hunt, now, seeded, grace, wait_for_job):
     """Update state from the users currently in The Hunt; return uids ready to announce.
 
     in_hunt: {uid: presence}. A user counts as newly joined if not seen in The Hunt within `grace`
-    seconds (absorbs presence flicker and short server hops). An announcement waits up to
-    `wait_for_job` seconds for the server id to show up in presence.
+    seconds (absorbs presence flicker and short server hops that include a brief absence). Separately,
+    someone who never goes absent but hops to a *different* server (their gameId changes) is treated as
+    a fresh event too -- otherwise a person who server-hops without ever fully leaving would only ever
+    be announced once, no matter how many times they actually change servers. An announcement waits up
+    to `wait_for_job` seconds for the server id to show up in presence.
     """
     ready = []
+    st.setdefault("last_job", {})
     for uid, p in in_hunt.items():
         last = st["hunt"].get(uid)
+        job = p.get("gameId")
         st["hunt"][uid] = now
         if not seeded:
+            if job:
+                st["last_job"][uid] = job
             continue
         if last is None or now - last > grace:
             st["pending"].setdefault(uid, now)
+        elif job and st["last_job"].get(uid) and job != st["last_job"][uid]:
+            st["pending"][uid] = now  # still here, but on a different server now -- treat as fresh
         first = st["pending"].get(uid)
-        if first is not None and (p.get("gameId") or now - first >= wait_for_job):
+        if first is not None and (job or now - first >= wait_for_job):
             ready.append(uid)
+            if job:
+                st["last_job"][uid] = job
     for uid in [u for u, t in st["pending"].items() if now - t > PENDING_MAX_AGE]:
         del st["pending"][uid]
     for uid in [u for u, t in st["hunt"].items() if now - t > 86400]:
         del st["hunt"][uid]
+    for uid in [u for u in st["last_job"] if u not in st["hunt"]]:
+        del st["last_job"][uid]
     return ready
 
 
