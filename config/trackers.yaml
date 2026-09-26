@@ -63,7 +63,7 @@ notifiers:
     roleId: "1552512715443146805"
     emoji: "<:roblox:1551329066337050754>"
     webhookSecret: DISCORD_WEBHOOK_DEVELOPER_JOINS
-    interval: 12
+    interval: 16
 
   admin:
     tracker: admin
@@ -81,7 +81,7 @@ notifiers:
     roleId: "1552548815268221009"
     emoji: "<:verified:1551329029783691334>"
     webhookSecret: DISCORD_WEBHOOK_VIDEO_STAR_JOINS
-    interval: 20
+    interval: 25
 
 settings:
   targetPlaceId: 74205509034203
