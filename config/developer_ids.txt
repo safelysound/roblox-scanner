@@ -1,6 +1,9 @@
 # Developer IDs — edit this file to update tracked developers without rerunning workflow
 # One ID per line, "#" for comments. Changes take effect on next 5-min scheduled run.
 # Merged Twin Atlas (92) + Sonar Studios Developers (39) + existing = 102 unique — updated 2026-09-21
+1692789105
+27855634
+10932819
 223827518
 302562
 630810
