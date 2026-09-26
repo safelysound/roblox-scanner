@@ -487,7 +487,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--notifier", required=True, help="name under notifiers: in config/trackers.yaml")
     ap.add_argument("--state", default=None)
-    ap.add_argument("--duration", type=int, default=260, help="seconds to keep polling (0 = forever)")
+    ap.add_argument("--duration", type=int, default=278, help="seconds to keep polling (0 = forever)")
     ap.add_argument("--interval", type=int, default=None, help="seconds between polls, start to start")
     ap.add_argument("--grace", type=int, default=180, help="absent this long before a return counts as a new join")
     ap.add_argument("--wait-for-job", type=int, default=30, help="max seconds to wait for the server id before announcing")
