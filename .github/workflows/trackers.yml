@@ -382,8 +382,12 @@ jobs:
           python join_notifier.py --notifier "$NOTIFIER" "${ARGS[@]}"
 
       - name: Persist notifier state
-        # dry-run/test must not write state: a dry-run "announces" to stdout and would consume a real join
-        if: ${{ always() && inputs.notifier_mode == 'live' }}
+        # dry-run/test must not write state: a dry-run "announces" to stdout and would consume a real join.
+        # Only on main: a run on any other branch must never push to main (this exact guard already exists
+        # on the message-id persist step below -- confirmed missing here the hard way, on a real test
+        # dispatch from a feature branch, before this was merged; the push only failed because a concurrent
+        # real production commit won the race, not because anything here stopped it).
+        if: ${{ always() && inputs.notifier_mode == 'live' && github.ref == 'refs/heads/main' }}
         continue-on-error: true
         env:
           ID: ${{ matrix.id }}
