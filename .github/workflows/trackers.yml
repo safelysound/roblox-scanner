@@ -45,6 +45,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       trackers: ${{ steps.plan.outputs.trackers }}
+      scan_trackers: ${{ steps.plan.outputs.scan_trackers }}
       scan: ${{ steps.plan.outputs.scan }}
       place_id: ${{ steps.plan.outputs.place_id }}
       notify: ${{ steps.plan.outputs.notify }}
@@ -67,19 +68,31 @@ jobs:
             echo "::error::No tracker matches '$SELECTED' in config/trackers.yaml"
             exit 1
           fi
-          # One scan job per (tracker, shard)
-          SCAN=$(jq -c '[.[] | . as $t | ($t.shards // 1) as $n | range(0; $n) as $s | {id: $t.id, shard: $s, shards: $n}]' <<< "$TRACKERS")
+          # scanEvery throttles only the scan -> merge -> embed-update pipeline (redundant with the
+          # notifier, which already polls presence for the same people); notify/follow always run every
+          # tick regardless. Only applies to the normal "all trackers" cadence -- a manual dispatch for
+          # one specific tracker (testing) always scans, regardless of the clock.
+          if [ -n "$SELECTED" ] && [ "$SELECTED" != "all" ]; then
+            SCAN_TRACKERS="$TRACKERS"
+          else
+            MINUTE=$(date -u +%-M)
+            SCAN_TRACKERS=$(jq -c --argjson m "$MINUTE" '[.[] | select((.scanEvery // 5) as $e | $m % $e == 0)]' <<< "$TRACKERS")
+          fi
+          # One scan job per (tracker, shard), built from the (possibly throttled) scan list
+          SCAN=$(jq -c '[.[] | . as $t | ($t.shards // 1) as $n | range(0; $n) as $s | {id: $t.id, shard: $s, shards: $n}]' <<< "$SCAN_TRACKERS")
           PLACE_ID="${INPUT_PLACE_ID:-$(yq '.settings.targetPlaceId' config/trackers.yaml)}"
-          # Join notifiers (one per selected tracker that has a notifiers: entry)
+          # Join notifiers (one per selected tracker that has a notifiers: entry) -- from the FULL
+          # tracker list, not the throttled scan list, so notifiers always run every tick.
           NOTIFY=$(yq -o=json -I=0 '(.notifiers // {}) | to_entries | map(.value + {"id": .key})' config/trackers.yaml \
                    | jq -c --argjson t "$TRACKERS" '[.[] | select(.id as $i | $t | map(.id) | index($i))]')
           {
             echo "trackers=$TRACKERS"
+            echo "scan_trackers=$SCAN_TRACKERS"
             echo "scan=$SCAN"
             echo "place_id=$PLACE_ID"
             echo "notify=$NOTIFY"
           } >> "$GITHUB_OUTPUT"
-          echo "Trackers: $(jq -r 'map(.id) | join(", ")' <<< "$TRACKERS") | scan jobs: $(jq length <<< "$SCAN") | place: $PLACE_ID"
+          echo "Trackers: $(jq -r 'map(.id) | join(", ")' <<< "$TRACKERS") | scanning this tick: $(jq -r 'map(.id) | join(", ")' <<< "$SCAN_TRACKERS") | scan jobs: $(jq length <<< "$SCAN") | place: $PLACE_ID"
 
   # ---------------------------------------------------------------------------
   # Scan: one job per tracker shard.
@@ -158,7 +171,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.trackers) }}
+        include: ${{ fromJSON(needs.plan.outputs.scan_trackers) }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -317,8 +330,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     permissions:
-      actions: read     # to fetch the previous run's state artifact
-      contents: read
+      contents: write
     concurrency:
       group: notifier-${{ matrix.id }}-${{ github.ref }}   # per ref: a test run on a branch never queues behind or cancels a live tick
       cancel-in-progress: false
@@ -328,6 +340,12 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.notify) }}
     steps:
       - uses: actions/checkout@v7
+        # State (state/notifier_<id>.json) is committed to main, not stored as an Actions artifact:
+        # artifact listing turned out to have a real eventual-consistency gap (confirmed in production --
+        # a person was re-announced a second time because the immediately-prior tick's saved artifact
+        # wasn't visible yet when the next tick queried for it). git checkout of main has no such gap: the
+        # concurrency group above serializes ticks for a given notifier, so this step is guaranteed to see
+        # the previous tick's own commit already merged before it even starts.
 
       - uses: actions/setup-python@v7
         with:
@@ -335,28 +353,6 @@ jobs:
           cache: pip
 
       - run: pip install -r requirements.txt
-
-      - name: Load previous notifier state
-        if: ${{ inputs.notifier_mode != 'test' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          NAME: notifier-state-${{ matrix.id }}
-        run: |
-          mkdir -p state
-          # per_page=1 trusted the API's own ordering, which is NOT reliably created_at-desc (verified: over
-          # half of a 100-artifact sample were 2+ positions out of true chronological order, drift up to 7
-          # positions). That could load a stale snapshot from several ticks back -- specifically, the exact
-          # snapshot from just before an announcement -- causing the same join to be announced again once
-          # it resurfaced. Fetch a page and sort by created_at ourselves instead of trusting return order.
-          ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=10" \
-                 --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id // empty')
-          if [ -n "$ID" ]; then
-            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ID/zip" > state.zip \
-              && unzip -o -q state.zip -d state \
-              || echo "::warning::could not load previous state; people already in The Hunt won't be announced"
-          else
-            echo "No previous state (first run): current Hunt players will be recorded silently"
-          fi
 
       - name: Watch ${{ matrix.id }} joining The Hunt
         env:
@@ -385,12 +381,28 @@ jobs:
           esac
           python join_notifier.py --notifier "$NOTIFIER" "${ARGS[@]}"
 
-      - name: Save notifier state
+      - name: Persist notifier state
         # dry-run/test must not write state: a dry-run "announces" to stdout and would consume a real join
         if: ${{ always() && inputs.notifier_mode == 'live' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: notifier-state-${{ matrix.id }}
-          path: state/notifier_${{ matrix.id }}.json
-          retention-days: 1
-          if-no-files-found: ignore
+        continue-on-error: true
+        env:
+          ID: ${{ matrix.id }}
+        run: |
+          FILE="state/notifier_${ID}.json"
+          if [ ! -f "$FILE" ]; then
+            echo "::warning::no $FILE produced this run, nothing to persist"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$FILE"
+          if git diff --staged --quiet; then
+            echo "State unchanged"
+            exit 0
+          fi
+          git commit -m "chore: update $ID notifier state [skip ci]"
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then exit 0; fi
+            sleep $((attempt * 2))
+          done
+          echo "::warning::Could not push $ID notifier state after retries; this tick's update is lost, next tick works from the prior commit"

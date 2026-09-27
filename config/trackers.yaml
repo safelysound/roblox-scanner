@@ -14,6 +14,9 @@
 #   webhookSecret  name of the Actions secret holding the Discord webhook URL
 #   resultsFile    merged scan output (consumed by the Discord + follow steps)
 #   messageIdFile  committed file remembering which Discord message to edit
+#   scanEvery      minutes between scans of this tracker (must be a multiple of 5, the tick interval;
+#                  default: every tick). The standing embed just refreshes less often -- the notifier
+#                  (real-time join alerts) and follow are unaffected, they always run every tick.
 
 trackers:
   - id: admin
@@ -25,6 +28,7 @@ trackers:
     webhookSecret: DISCORD_WEBHOOK
     resultsFile: roblox_scan_results.json
     messageIdFile: .github/discord_message_id.txt
+    scanEvery: 15  # was every tick; this is by far the biggest single presence-load contributor (~2800 members)
 
   - id: video-stars
     name: Video Star Tracker
@@ -36,6 +40,7 @@ trackers:
     webhookSecret: DISCORD_WEBHOOK_VIDEO_STARS
     resultsFile: roblox_scan_results_video.json
     messageIdFile: .github/discord_message_id_video_stars.txt
+    scanEvery: 15
 
   - id: developers
     name: Developer Tracker
