@@ -31,7 +31,7 @@ DEFAULT_UNIVERSE_ID = 10766456501
 # Reads alt cookie that Follows the 102 devs. Presence then returns InGame instead of Offline.
 # Supports: ROBLOSECURITY, ROBLOX_COOKIE, ROBLOSECURITY_1 (all read, first found used)
 def _get_roblox_cookie() -> str:
-    for key in ["ROBLOX_COOKIE", "ROBLOSECURITY", "ROBLOSECURITY_1", "ROBLOSECURITY_2", "ROBLOSECURITY_3", "ROBLOSECURITY_4", "ROBLOSECURITY_5", "ROBLOSECURITY_6", "ROBLOSECURITY1", "ROBLOSECURITY2"]:
+    for key in ["ROBLOX_COOKIE", "ROBLOSECURITY"] + [f"ROBLOSECURITY_{i}" for i in range(1, 13)]:
         val = os.environ.get(key, "")
         if val and val.strip():
             v = val.strip().strip('"').strip("'")
@@ -52,7 +52,7 @@ def _get_all_cookies():
     """Return list of (key, cookie) for all configured accounts, deduped by value. ROBLOX_COOKIE takes priority."""
     pool=[]
     seen=set()
-    for key in ["ROBLOX_COOKIE", "ROBLOSECURITY", "ROBLOSECURITY_1", "ROBLOSECURITY_2", "ROBLOSECURITY_3", "ROBLOSECURITY_4", "ROBLOSECURITY_5", "ROBLOSECURITY_6"]:
+    for key in ["ROBLOX_COOKIE", "ROBLOSECURITY"] + [f"ROBLOSECURITY_{i}" for i in range(1, 13)]:
         val = __import__("os").environ.get(key, "")
         if val and val.strip():
             v = val.strip().strip('"').strip("'")

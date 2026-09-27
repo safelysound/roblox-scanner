@@ -119,6 +119,13 @@ jobs:
           ROBLOSECURITY_3: ${{ secrets.ROBLOSECURITY_3 }}
           ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
           ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
+          ROBLOSECURITY_6: ${{ secrets.ROBLOSECURITY_6 }}
+          ROBLOSECURITY_7: ${{ secrets.ROBLOSECURITY_7 }}
+          ROBLOSECURITY_8: ${{ secrets.ROBLOSECURITY_8 }}
+          ROBLOSECURITY_9: ${{ secrets.ROBLOSECURITY_9 }}
+          ROBLOSECURITY_10: ${{ secrets.ROBLOSECURITY_10 }}
+          ROBLOSECURITY_11: ${{ secrets.ROBLOSECURITY_11 }}
+          ROBLOSECURITY_12: ${{ secrets.ROBLOSECURITY_12 }}
         run: |
           ARGS=()
           if [ -n "$MAX_MEMBERS" ]; then ARGS+=(--max-members "$MAX_MEMBERS"); fi
@@ -282,6 +289,13 @@ jobs:
           ROBLOSECURITY_3: ${{ secrets.ROBLOSECURITY_3 }}
           ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
           ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
+          ROBLOSECURITY_6: ${{ secrets.ROBLOSECURITY_6 }}
+          ROBLOSECURITY_7: ${{ secrets.ROBLOSECURITY_7 }}
+          ROBLOSECURITY_8: ${{ secrets.ROBLOSECURITY_8 }}
+          ROBLOSECURITY_9: ${{ secrets.ROBLOSECURITY_9 }}
+          ROBLOSECURITY_10: ${{ secrets.ROBLOSECURITY_10 }}
+          ROBLOSECURITY_11: ${{ secrets.ROBLOSECURITY_11 }}
+          ROBLOSECURITY_12: ${{ secrets.ROBLOSECURITY_12 }}
         run: |
           if [ ! -f "$RESULTS" ]; then
             echo "No $RESULTS, skipping follow"
@@ -356,6 +370,13 @@ jobs:
           ROBLOSECURITY_3: ${{ secrets.ROBLOSECURITY_3 }}
           ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
           ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
+          ROBLOSECURITY_6: ${{ secrets.ROBLOSECURITY_6 }}
+          ROBLOSECURITY_7: ${{ secrets.ROBLOSECURITY_7 }}
+          ROBLOSECURITY_8: ${{ secrets.ROBLOSECURITY_8 }}
+          ROBLOSECURITY_9: ${{ secrets.ROBLOSECURITY_9 }}
+          ROBLOSECURITY_10: ${{ secrets.ROBLOSECURITY_10 }}
+          ROBLOSECURITY_11: ${{ secrets.ROBLOSECURITY_11 }}
+          ROBLOSECURITY_12: ${{ secrets.ROBLOSECURITY_12 }}
         run: |
           ARGS=()
           case "$MODE" in
