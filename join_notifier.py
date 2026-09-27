@@ -275,27 +275,34 @@ def save_state(path, st):
 def detect(st, in_hunt, now, seeded, grace, wait_for_job):
     """Update state from the users currently in The Hunt; return uids ready to announce.
 
-    in_hunt: {uid: presence}. A user counts as newly joined if not seen in The Hunt within `grace`
-    seconds (absorbs presence flicker and short server hops that include a brief absence). Separately,
-    someone who never goes absent but hops to a *different* server (their gameId changes) is treated as
-    a fresh event too -- otherwise a person who server-hops without ever fully leaving would only ever
-    be announced once, no matter how many times they actually change servers. An announcement waits up
-    to `wait_for_job` seconds for the server id to show up in presence.
+    The server id (gameId) is globally unique per Roblox server instance, so it is the ground truth for
+    "is this the same session": if we see the SAME job id again, that is proof it's a continuing session,
+    no matter how long the gap since we last confirmed it -- someone only visible through one account that
+    keeps getting rate-limited might be glimpsed just once every several ticks, but every glimpse shows the
+    same server, and that must never re-announce (confirmed in production: one person was re-announced ~50
+    times over 5 hours on the exact same server id, purely from intermittent visibility, not real absence).
+
+    A DIFFERENT job id -- whether they were ever truly absent or not -- means a real, fresh event: either a
+    genuine first join, a real return after leaving, or a hop to a different server while never going fully
+    unseen. An announcement waits up to `wait_for_job` seconds for the server id to show up in presence.
     """
     ready = []
     st.setdefault("last_job", {})
     for uid, p in in_hunt.items():
         last = st["hunt"].get(uid)
         job = p.get("gameId")
+        prev_job = st["last_job"].get(uid)
         st["hunt"][uid] = now
         if not seeded:
             if job:
                 st["last_job"][uid] = job
             continue
-        if last is None or now - last > grace:
+        if job and prev_job and job == prev_job:
+            continue  # confirmed same server as last sighting -- never a new event, regardless of any gap
+        if job and prev_job and job != prev_job:
+            st["pending"][uid] = now  # real hop: we already have the new job id, don't wait on it
+        elif last is None or now - last > grace:
             st["pending"].setdefault(uid, now)
-        elif job and st["last_job"].get(uid) and job != st["last_job"][uid]:
-            st["pending"][uid] = now  # still here, but on a different server now -- treat as fresh
         first = st["pending"].get(uid)
         if first is not None and (job or now - first >= wait_for_job):
             ready.append(uid)
