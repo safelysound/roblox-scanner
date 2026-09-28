@@ -21,3 +21,4 @@ save.zip
 __pycache__/
 *.pyc
 .venv/
+state/

@@ -239,6 +239,9 @@ def is_hunt(p, place_id, universe_id):
 
 # ---------------------------------------------------------------- state / join detection
 
+LOAD_INFO = {"result": "not loaded", "age": None}   # what load_state found, for the run summary
+
+
 def fresh_state():
     return {"hunt": {}, "pending": {}, "last_job": {}, "updated": 0, "members": [], "members_ts": 0}
 
@@ -253,10 +256,14 @@ def load_state(path):
         st.setdefault("members", [])
         st.setdefault("members_ts", 0)
     except (OSError, ValueError):
+        LOAD_INFO.update(result="none (fresh start)", age=None)
         return fresh_state(), False
-    if time.time() - st.get("updated", 0) > STATE_MAX_STALE:
+    age = time.time() - st.get("updated", 0)
+    if age > STATE_MAX_STALE:
         log("state is stale, reseeding without announcements")
+        LOAD_INFO.update(result="STALE (reseeded silently)", age=age)
         return fresh_state(), False
+    LOAD_INFO.update(result="loaded", age=age)
     # Trusted state: everyone recorded as in The Hunt is assumed to still be there. Without this, a gap
     # between runs longer than the grace window would make all of them look like fresh joins.
     now = time.time()
@@ -589,6 +596,9 @@ def main():
             break
         time.sleep(max(0.0, interval - (time.time() - t0)))
 
+    state_note = LOAD_INFO["result"]
+    if LOAD_INFO["age"] is not None:
+        state_note += f" (age {LOAD_INFO['age']:.0f}s)"
     limited = sum(1 for a in accounts if a.limited)
     dead = sum(1 for a in accounts if a.dead)
     total_req = sum(a.requests for a in accounts)
@@ -596,6 +606,7 @@ def main():
     waits = sorted(w for a in accounts for w in a.limited)
     print(f"::notice title=notifier {args.notifier}::{good_polls}/{polls} polls ok, {sent} announcement(s), "
           f"{len(st['hunt'])} in The Hunt, {len(ids)} watched, avg hidden {pstats['hidden'] / max(1, polls):.0f}, avg sweep {sum(sweep_secs)/len(sweep_secs):.0f}s, "
+          f"state at start: {state_note} | "
           f"rate-limited accounts {limited}, disabled accounts {dead} of {len(accounts)} in pool | presence requests {total_req} in {time.time()-start:.0f}s, "
           f"429s {n429}, retry-after {waits[0] if waits else '-'}..{waits[-1] if waits else '-'}s")
     return 0 if good_polls else 1

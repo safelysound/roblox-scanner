@@ -354,6 +354,37 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      - name: Load notifier state
+        # Fetch the state branch explicitly instead of relying on checkout (which is pinned to the commit that
+        # existed at dispatch time). Also read by dry-run so it behaves like the real thing; test mode skips it.
+        if: ${{ inputs.notifier_mode != 'test' }}
+        env:
+          ID: ${{ matrix.id }}
+        run: |
+          BR="notifier-state-${ID}"
+          mkdir -p state
+          STATUS=unknown
+          for attempt in 1 2 3; do
+            rc=0
+            git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1 || rc=$?
+            if [ "$rc" -eq 0 ]; then STATUS=present; break; fi
+            if [ "$rc" -eq 2 ]; then STATUS=absent; break; fi
+            sleep $((attempt * 2))
+          done
+          case "$STATUS" in
+            present)
+              git fetch -q --depth=1 origin "refs/heads/${BR}:refs/remotes/origin/${BR}"
+              git show "origin/${BR}:notifier_${ID}.json" > "state/notifier_${ID}.json"
+              echo "Loaded state from branch ${BR}"
+              ;;
+            absent)
+              echo "No state branch yet (first run): current Hunt players will be recorded silently"
+              ;;
+            *)
+              echo "::warning::could not reach the remote to load $ID state; starting fresh (silent reseed)"
+              ;;
+          esac
+
       - name: Watch ${{ matrix.id }} joining The Hunt
         env:
           MODE: ${{ inputs.notifier_mode }}
@@ -383,30 +414,40 @@ jobs:
 
       - name: Persist notifier state
         # dry-run/test must not write state: a dry-run "announces" to stdout and would consume a real join.
-        # Only on main: a run on any other branch must never push to main (this exact guard already exists
-        # on the message-id persist step below -- confirmed missing here the hard way, on a real test
-        # dispatch from a feature branch, before this was merged; the push only failed because a concurrent
-        # real production commit won the race, not because anything here stopped it).
+        # Only on main: a run on any other branch must never write live state.
+        #
+        # State lives on its own branch per notifier (notifier-state-<id>), force-pushed as a single commit:
+        #  - no shared push target between the three notifiers, so no contention (the old approach, committing
+        #    to main, lost 2-15% of state updates to push races, and each lost update re-announced everyone
+        #    who had joined during that tick),
+        #  - no history growth on main,
+        #  - the load step above fetches this branch explicitly, so it always sees the newest commit (checkout
+        #    alone pins to the commit that existed when the run was DISPATCHED, which can be a tick behind).
+        # The concurrency group guarantees only one job per notifier is ever writing its branch.
         if: ${{ always() && inputs.notifier_mode == 'live' && github.ref == 'refs/heads/main' }}
         continue-on-error: true
         env:
           ID: ${{ matrix.id }}
         run: |
           FILE="state/notifier_${ID}.json"
+          BR="notifier-state-${ID}"
           if [ ! -f "$FILE" ]; then
             echo "::warning::no $FILE produced this run, nothing to persist"
             exit 0
           fi
+          REMOTE=$(git remote get-url origin)
+          AUTH=$(git config --get http.https://github.com/.extraheader || true)
+          TMP=$(mktemp -d)
+          cp "$FILE" "$TMP/notifier_${ID}.json"
+          cd "$TMP"
+          git init -q -b "$BR"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$FILE"
-          if git diff --staged --quiet; then
-            echo "State unchanged"
-            exit 0
-          fi
-          git commit -m "chore: update $ID notifier state [skip ci]"
-          for attempt in 1 2 3; do
-            if git pull --rebase origin main && git push origin HEAD:main; then exit 0; fi
+          if [ -n "$AUTH" ]; then git config http.https://github.com/.extraheader "$AUTH"; fi
+          git add "notifier_${ID}.json"
+          git commit -q -m "notifier state: $ID $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          for attempt in 1 2 3 4; do
+            if git push -q --force "$REMOTE" "HEAD:refs/heads/${BR}"; then exit 0; fi
             sleep $((attempt * 2))
           done
-          echo "::warning::Could not push $ID notifier state after retries; this tick's update is lost, next tick works from the prior commit"
+          echo "::warning::Could not push $ID notifier state after 4 attempts; this tick's update is lost, next tick works from the prior state"
