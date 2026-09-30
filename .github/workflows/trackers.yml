@@ -115,6 +115,7 @@ jobs:
   # ---------------------------------------------------------------------------
   scan:
     needs: plan
+    if: ${{ needs.plan.outputs.scan != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
@@ -176,7 +177,7 @@ jobs:
   # ---------------------------------------------------------------------------
   merge:
     needs: [plan, scan]
-    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.scan_trackers != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -278,7 +279,7 @@ jobs:
   # ---------------------------------------------------------------------------
   follow:
     needs: [plan, merge]
-    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.trackers != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
