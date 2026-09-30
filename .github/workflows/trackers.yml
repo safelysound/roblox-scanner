@@ -68,6 +68,22 @@ jobs:
             echo "::error::No tracker matches '$SELECTED' in config/trackers.yaml"
             exit 1
           fi
+          # Between events: settings.paused stops the automatic cron dispatch (tracker unset/"all") with
+          # empty matrices everywhere, so scan/merge/notify/follow all run zero job instances -- no Discord
+          # posts, no Roblox API calls, nothing to rate-limit. A manual dispatch for one specific tracker
+          # always runs regardless, so testing and prep work between events still works normally.
+          PAUSED=$(yq '.settings.paused // false' config/trackers.yaml)
+          if [ "$PAUSED" = "true" ] && { [ -z "$SELECTED" ] || [ "$SELECTED" = "all" ]; }; then
+            echo "::notice::Paused (config/trackers.yaml settings.paused) -- automatic dispatch does nothing this tick. Dispatch a specific tracker manually to bypass."
+            {
+              echo "trackers=[]"
+              echo "scan_trackers=[]"
+              echo "scan=[]"
+              echo "place_id="
+              echo "notify=[]"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # scanEvery throttles only the scan -> merge -> embed-update pipeline (redundant with the
           # notifier, which already polls presence for the same people); notify/follow always run every
           # tick regardless. Only applies to the normal "all trackers" cadence -- a manual dispatch for

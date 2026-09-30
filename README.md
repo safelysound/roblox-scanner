@@ -37,6 +37,15 @@ Cookies are read from environment variables (see `cookies.example.txt`); without
 - **Big groups (Admin, Video Stars):** one account, rotating each poll, sweeps the whole group; only users who are "in-game, location hidden" are re-checked through the other accounts. Someone who appears offline to everyone except their followers is found more slowly than in the Developer list, which queries every account. Group member lists are cached for an hour.
 - Run it continuously on your own machine instead: `python join_notifier.py --notifier developers --duration 0`.
 
+## Pausing between events
+
+Set `settings.paused: true` in `config/trackers.yaml` to stop all automatic activity — no scans, no Discord
+posts, no Roblox API calls, nothing to rate-limit — without touching any code or GitHub secrets. The
+automatic cron dispatch (`tracker` unset or `all`) does nothing while paused; the run completes in a few
+seconds with empty job matrices. A manual dispatch for one specific tracker (e.g. `tracker: admin`) always
+runs regardless, so testing and prep work between events isn't affected. Set it back to `false` when the
+next event starts.
+
 ## Config — add a tracker without touching the workflow
 
 Everything lives in [`config/trackers.yaml`](config/trackers.yaml): group ID and/or ID file, extra IDs, shard count, embed title/colour/emoji, webhook secret name, results file and message-id file. The workflow builds its job matrix from that file, so a new tracker is one YAML block plus its webhook secret. (For *manual* runs, also add the id to the `tracker` choice list in the workflow.)

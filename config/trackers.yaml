@@ -91,3 +91,8 @@ notifiers:
 settings:
   targetPlaceId: 74205509034203
   targetUniverseId: 10766456501
+  # Set to true between events to stop all automatic activity (scan, notify, follow) with zero code
+  # changes -- flip back to false when the next event starts. Only affects the automatic cron dispatch
+  # (tracker: all/unset); a manual dispatch for one specific tracker always runs, so testing and prep
+  # work between events is unaffected.
+  paused: true
