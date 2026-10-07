@@ -40,6 +40,7 @@ from developer_scanner import (
     _get_all_cookies,
     fetch_user_infos,
     load_user_ids,
+    resolve_game_name,
 )
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -228,10 +229,12 @@ def poll(accounts, ids, poll_no=0, stats=None):
     return best, ok, complete
 
 
-def is_hunt(p, place_id, universe_id):
-    """Same rule as tracker_scanner: in-game and in the Hunt place/universe."""
+def is_hunt(p, place_id, universe_id, any_game=False):
+    """Same rule as tracker_scanner: in-game, and (any_game: in ANY game; else: in the Hunt place/universe)."""
     if not p or p.get("userPresenceType") != 2:
         return False
+    if any_game:
+        return bool(p.get("placeId") or p.get("rootPlaceId") or p.get("universeId"))
     if universe_id and p.get("universeId") == universe_id:
         return True
     return place_id in (p.get("placeId"), p.get("rootPlaceId"))
@@ -369,15 +372,19 @@ def avatar_url(uid):
         return None
 
 
-def build_payload(uid, name, p, cfg, joined_at, thumb=None, test=False):
+def build_payload(uid, name, p, cfg, joined_at, thumb=None, test=False, game_name=None):
     display = md_escape(name.get("displayName") or name.get("username") or f"User {uid}")
     username = md_escape(name.get("username") or str(uid))
     profile = f"https://www.roblox.com/users/{uid}/profile"
     job = (p or {}).get("gameId")
     server = f"`{job}`" if job else "`server not visible`"
-    desc = (f"- {cfg['emoji']} [{display} ({username})]({profile}) has joined **The Hunt**!\n"
+    game_label = game_name or "The Hunt"
+    desc = (f"- {cfg['emoji']} [{display} ({username})]({profile}) has joined **{game_label}**!\n"
             f"<t:{int(joined_at)}:R>\u30fb{server}")
-    embed = {"title": ("[TEST] " if test else "") + cfg["title"], "description": desc}
+    # cfg['title'] may contain a {game} placeholder (any_game-mode notifiers); .format() is a safe no-op
+    # for titles that don't reference it (e.g. Developers, which is always Hunt-specific).
+    title_text = cfg["title"].format(game=game_label)
+    embed = {"title": ("[TEST] " if test else "") + title_text, "description": desc}
     if cfg.get("color") is not None:
         embed["color"] = cfg["color"]
     if thumb:
@@ -528,6 +535,7 @@ def main():
 
     place_id = int(settings.get("targetPlaceId", DEFAULT_PLACE_ID))
     universe_id = int(settings.get("targetUniverseId", DEFAULT_UNIVERSE_ID))
+    any_game = bool(tracker.get("anyGame", False))
 
     if args.test:
         uid = (load_user_ids(tracker["idsFile"]) if tracker.get("idsFile") else [1])[0]
@@ -537,8 +545,9 @@ def main():
             name = {}
         sample = {"userPresenceType": 2, "placeId": place_id, "rootPlaceId": place_id,
                   "gameId": "00000000-0000-0000-0000-000000000000"}
+        sample_game = "a Test Game" if any_game else None
         thumb = avatar_url(uid) if cfg["thumbnail"] == "avatar" else None
-        ok, button = post_webhook(webhook, build_payload(uid, name, sample, cfg, time.time(), thumb, test=True), args.dry_run)
+        ok, button = post_webhook(webhook, build_payload(uid, name, sample, cfg, time.time(), thumb, test=True, game_name=sample_game), args.dry_run)
         print(f"::notice title=notifier {args.notifier} test::sent={ok} button_accepted={button} thumbnail={'yes' if thumb else 'no'}")
         return 0 if ok else 1
 
@@ -558,6 +567,22 @@ def main():
         f"{'ever' if not args.duration else str(args.duration) + 's'}")
 
     names = {}
+    game_name_cache = {}  # universeId -> resolved name, any_game mode only
+
+    def _game_name_for(p):
+        if not any_game:
+            return None
+        u = p.get("universeId")
+        if u:
+            if u not in game_name_cache:
+                try:
+                    game_name_cache[u] = resolve_game_name(u)
+                except Exception:
+                    game_name_cache[u] = None
+            if game_name_cache[u]:
+                return game_name_cache[u]
+        return p.get("lastLocation") or "a game"
+
     start = time.time()
     polls = good_polls = sent = 0
     sweep_secs = []
@@ -569,12 +594,13 @@ def main():
         sweep_secs.append(time.time() - t0)
         if ok:
             good_polls += 1
-            in_hunt = {u: p for u, p in best.items() if is_hunt(p, place_id, universe_id)}
+            in_hunt = {u: p for u, p in best.items() if is_hunt(p, place_id, universe_id, any_game)}
             ready = detect(st, in_hunt, t0, seeded, args.grace, args.wait_for_job)
             if not seeded and (complete or t0 - start >= SEED_MAX_WAIT):
                 # Only trust the baseline once every account answered; otherwise people visible through a
                 # failed account would look like fresh joins when it recovers.
-                log(f"seeded: {len(in_hunt)} already in The Hunt, not announcing" + ("" if complete else " (incomplete after waiting)"))
+                what = "in-game (any game)" if any_game else "already in The Hunt"
+                log(f"seeded: {len(in_hunt)} {what}, not announcing" + ("" if complete else " (incomplete after waiting)"))
                 seeded = True
             for uid in ready:
                 if uid not in names:
@@ -584,8 +610,9 @@ def main():
                         pass
                 joined_at = st["pending"].get(uid, t0)
                 thumb = avatar_url(uid) if cfg["thumbnail"] == "avatar" else None
-                log(f"announcing {uid} (server id {'yes' if in_hunt[uid].get('gameId') else 'no'})")
-                sent_ok, _ = post_webhook(webhook, build_payload(uid, names.get(uid, {}), in_hunt[uid], cfg, joined_at, thumb), args.dry_run)
+                game_name = _game_name_for(in_hunt[uid])
+                log(f"announcing {uid} ({game_name or 'The Hunt'}, server id {'yes' if in_hunt[uid].get('gameId') else 'no'})")
+                sent_ok, _ = post_webhook(webhook, build_payload(uid, names.get(uid, {}), in_hunt[uid], cfg, joined_at, thumb, game_name=game_name), args.dry_run)
                 if sent_ok:
                     st["pending"].pop(uid, None)
                     sent += 1

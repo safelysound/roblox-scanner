@@ -37,6 +37,7 @@ def merge_shards(paths: List[str], json_out: str = "", csv_out: str = ""):
     game_name = None
     game_url = None
     group_url = None
+    any_game = False
 
     for p in paths:
         data = json.loads(Path(p).read_text(encoding="utf-8"))
@@ -48,6 +49,7 @@ def merge_shards(paths: List[str], json_out: str = "", csv_out: str = ""):
         game_name = meta.get("targetGameName", game_name)
         game_url = meta.get("targetGameUrl", game_url)
         group_url = meta.get("groupUrl", group_url)
+        any_game = any_game or bool(meta.get("anyGame", False))
         total_elapsed = max(total_elapsed, meta.get("elapsed_seconds", 0))
         all_target.extend(data.get("target_game_players", []))
         all_other.extend(data.get("other_game_players", []))
@@ -91,6 +93,7 @@ def merge_shards(paths: List[str], json_out: str = "", csv_out: str = ""):
         "targetUniverseId": target_universe,
         "targetGameName": game_name,
         "targetGameUrl": game_url,
+        "anyGame": any_game,
         "total_members": total_members,
         "elapsed_seconds": round(total_elapsed, 2),
         "timestamp": timestamp,

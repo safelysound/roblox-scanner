@@ -177,11 +177,14 @@ def resolve_tracker(args):
                 line=line.strip()
                 if line and not line.startswith("#") and line.isdigit():
                     extra_ids.append(int(line))
-    return group_id, ids_file, extra_ids, place_id
+        any_game = bool(cfg.get("anyGame", False))
+    else:
+        any_game = False
+    return group_id, ids_file, extra_ids, place_id, any_game
 
 def tracker_main_logic():
     args = parse_args()
-    group_id, ids_file, extra_ids, place_id = resolve_tracker(args)
+    group_id, ids_file, extra_ids, place_id, any_game = resolve_tracker(args)
     verbose = args.verbose
     all_members=[]
     group_members=[]
@@ -253,11 +256,18 @@ def tracker_main_logic():
         members_for_presence=members_slice
     else:
         members_for_presence=all_members
-    # resolve universe
-    universe=args.universe_id or resolve_universe_id(place_id) or DEFAULT_UNIVERSE_ID
-    game_name=resolve_game_name(universe)
-    if game_name and verbose:
-        print(f'Target game: "{game_name}" Universe {universe}', file=sys.stderr)
+    # resolve universe -- not meaningful in any_game mode, where every universe a member is in matters,
+    # not one fixed target; game names there are resolved per-person below instead, as they're seen.
+    if any_game:
+        universe = None
+        game_name = None
+        if verbose:
+            print("any_game mode: tracking every game members are in, not one fixed target", file=sys.stderr)
+    else:
+        universe=args.universe_id or resolve_universe_id(place_id) or DEFAULT_UNIVERSE_ID
+        game_name=resolve_game_name(universe)
+        if game_name and verbose:
+            print(f'Target game: "{game_name}" Universe {universe}', file=sys.stderr)
     ids_for_presence=[m["userId"] for m in members_for_presence]
     try: _log_cookie_status()
     except Exception as e: print(f"cookie status check failed: {type(e).__name__}", file=sys.stderr)
@@ -288,6 +298,13 @@ def tracker_main_logic():
         my_id=None
         print("Pool no my_id - unauthenticated", file=sys.stderr)
     target=[]; other=[]; offline=[]
+    game_name_cache={}  # universeId -> resolved name, any_game mode only (avoid re-resolving per person)
+    def _cached_game_name(u):
+        if u is None:
+            return None
+        if u not in game_name_cache:
+            game_name_cache[u]=resolve_game_name(u)
+        return game_name_cache[u]
     for m in members_for_presence:
         uid=m["userId"]
         pres=presences.get(uid)
@@ -301,7 +318,10 @@ def tracker_main_logic():
         last_loc=pres.get("lastLocation","")
         is_in_game=(ptype==2)
         is_target=False
-        if is_in_game:
+        if any_game:
+            # Every in-game member is "the target" here -- there's no single game to match against.
+            is_target=is_in_game
+        elif is_in_game:
             if universe and univ==universe:
                 is_target=True
             elif place_id_p==place_id or root_place==place_id:
@@ -317,7 +337,9 @@ def tracker_main_logic():
                     is_following=True
                     print(f"per-user isFollowing true for {uid}", file=sys.stderr)
             except: pass
-        if ptype==2 and place_id_p is None and root_place is None and univ is None:
+        if not any_game and ptype==2 and place_id_p is None and root_place is None and univ is None:
+            # Hunt-specific fallback (profile page sometimes reveals it even when presence hides the place).
+            # Not meaningful in any_game mode -- there's no single game to confirm via this trick.
             if _profile_shows_hunt(uid, headers_for_follow):
                 print(f"profile scrape: {uid} shows Hunt via profile", file=sys.stderr)
                 place_id_p=74205509034203
@@ -327,7 +349,8 @@ def tracker_main_logic():
                 is_following=True
                 is_target=True
                 is_in_game=True
-        enriched={**m, "presenceType": ptype, "presenceTypeName": {0:"Offline",1:"Online",2:"InGame",3:"InStudio"}.get(ptype,str(ptype)), "lastLocation": last_loc, "placeId": place_id_p, "rootPlaceId": root_place, "universeId": univ, "gameId": pres.get("gameId"), "lastOnline": pres.get("lastOnline"), "isFollowing": is_following, "presence_raw": pres}
+        game_name_p = _cached_game_name(univ) if (any_game and is_in_game) else None
+        enriched={**m, "presenceType": ptype, "presenceTypeName": {0:"Offline",1:"Online",2:"InGame",3:"InStudio"}.get(ptype,str(ptype)), "lastLocation": last_loc, "placeId": place_id_p, "rootPlaceId": root_place, "universeId": univ, "gameId": pres.get("gameId"), "gameName": game_name_p, "lastOnline": pres.get("lastOnline"), "isFollowing": is_following, "presence_raw": pres}
         if is_target:
             target.append(enriched)
         elif is_in_game:
@@ -337,7 +360,10 @@ def tracker_main_logic():
     target.sort(key=lambda x: (x["username"] or "").lower())
     other.sort(key=lambda x: ((x["lastLocation"] or ""), (x["username"] or "").lower()))
     total_members=len(members_for_presence)
-    print(f"Target Hunt: {len(target)} | Other: {len(other)} | Offline: {len(offline)} | Total slice {total_members}", file=sys.stderr)
+    if any_game:
+        print(f"In-game (any game): {len(target)} | Offline: {len(offline)} | Total slice {total_members}", file=sys.stderr)
+    else:
+        print(f"Target Hunt: {len(target)} | Other: {len(other)} | Offline: {len(offline)} | Total slice {total_members}", file=sys.stderr)
     meta_group = group_id if group_id is not None else (f"tracker:{args.tracker}" if args.tracker else "developer_list")
     group_url = f"https://www.roblox.com/communities/{group_id}/" if group_id else ""
     meta={
@@ -346,6 +372,7 @@ def tracker_main_logic():
         "targetPlaceId": place_id,
         "targetUniverseId": universe,
         "targetGameName": game_name,
+        "anyGame": any_game,
         "targetGameUrl": f"https://www.roblox.com/games/{place_id}/",
         "total_members": total_members,
         "full_group_size": len(all_members),

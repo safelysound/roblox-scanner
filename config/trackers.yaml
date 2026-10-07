@@ -17,6 +17,10 @@
 #   scanEvery      minutes between scans of this tracker (must be a multiple of 5, the tick interval;
 #                  default: every tick). The standing embed just refreshes less often -- the notifier
 #                  (real-time join alerts) and follow are unaffected, they always run every tick.
+#   anyGame        true: track whatever game+server each member is currently in, instead of requiring
+#                  settings.targetPlaceId specifically. Testing mode between events (there's no fixed
+#                  game to test against when nothing's running) -- flip back to false/omit for the next
+#                  real event. Also used by this tracker's notifier entry below (same tracker id).
 
 trackers:
   - id: admin
@@ -29,6 +33,7 @@ trackers:
     resultsFile: roblox_scan_results.json
     messageIdFile: .github/discord_message_id.txt
     scanEvery: 15  # was every tick; this is by far the biggest single presence-load contributor (~2800 members)
+    anyGame: true  # TESTING between events -- see field docs above
 
   - id: video-stars
     name: Video Star Tracker
@@ -41,6 +46,7 @@ trackers:
     resultsFile: roblox_scan_results_video.json
     messageIdFile: .github/discord_message_id_video_stars.txt
     scanEvery: 15
+    anyGame: true  # TESTING between events -- see field docs above
 
   - id: developers
     name: Developer Tracker
@@ -72,7 +78,7 @@ notifiers:
 
   admin:
     tracker: admin
-    title: "An Admin has joined The Hunt: Roblox 20!"
+    title: "An Admin has joined {game}!"  # {game} substituted per-join while anyGame: true above
     color: "#E74C3C"
     roleId: "1552548764021956748"
     emoji: "<:roblox:1551329066337050754>"
@@ -81,7 +87,7 @@ notifiers:
 
   video-stars:
     tracker: video-stars
-    title: "A Video Star has joined The Hunt: Roblox 20!"
+    title: "A Video Star has joined {game}!"  # {game} substituted per-join while anyGame: true above
     color: "#F1C40F"
     roleId: "1552548815268221009"
     emoji: "<:verified:1551329029783691334>"
