@@ -632,7 +632,7 @@ def main():
     n429 = sum(len(a.limited) for a in accounts)
     waits = sorted(w for a in accounts for w in a.limited)
     print(f"::notice title=notifier {args.notifier}::{good_polls}/{polls} polls ok, {sent} announcement(s), "
-          f"{len(st['hunt'])} in The Hunt, {len(ids)} watched, avg hidden {pstats['hidden'] / max(1, polls):.0f}, avg sweep {sum(sweep_secs)/len(sweep_secs):.0f}s, "
+          f"{len(st['hunt'])} {'in-game (any game)' if any_game else 'in The Hunt'}, {len(ids)} watched, avg hidden {pstats['hidden'] / max(1, polls):.0f}, avg sweep {sum(sweep_secs)/len(sweep_secs):.0f}s, "
           f"state at start: {state_note} | "
           f"rate-limited accounts {limited}, disabled accounts {dead} of {len(accounts)} in pool | presence requests {total_req} in {time.time()-start:.0f}s, "
           f"429s {n429}, retry-after {waits[0] if waits else '-'}..{waits[-1] if waits else '-'}s")
