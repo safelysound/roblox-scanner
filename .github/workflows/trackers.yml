@@ -74,15 +74,26 @@ jobs:
           # always runs regardless, so testing and prep work between events still works normally.
           PAUSED=$(yq '.settings.paused // false' config/trackers.yaml)
           if [ "$PAUSED" = "true" ] && { [ -z "$SELECTED" ] || [ "$SELECTED" = "all" ]; }; then
-            echo "::notice::Paused (config/trackers.yaml settings.paused) -- automatic dispatch does nothing this tick. Dispatch a specific tracker manually to bypass."
-            {
-              echo "trackers=[]"
-              echo "scan_trackers=[]"
-              echo "scan=[]"
-              echo "place_id="
-              echo "notify=[]"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
+            # Paused, but anyGame (testing) trackers keep running automatically -- they exist specifically
+            # to generate continuous test traffic between events. Everything else (anyGame not set/false,
+            # e.g. Developers, and whichever trackers go back to being real production for the next event)
+            # stays fully stopped. This also means a tracker transitions correctly on its own the moment
+            # anyGame is flipped back off for the real event: it falls back under the pause with no other
+            # change needed here.
+            TRACKERS=$(jq -c '[.[] | select(.anyGame == true)]' <<< "$TRACKERS")
+            if [ "$(jq length <<< "$TRACKERS")" -eq 0 ]; then
+              echo "::notice::Paused (config/trackers.yaml settings.paused), no anyGame testing trackers configured -- doing nothing this tick."
+              {
+                echo "trackers=[]"
+                echo "scan_trackers=[]"
+                echo "scan=[]"
+                echo "place_id="
+                echo "notify=[]"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            TESTING_NAMES=$(jq -r 'map(.id) | join(", ")' <<< "$TRACKERS")
+            echo "::notice::Paused -- running only anyGame testing trackers this tick: $TESTING_NAMES"
           fi
           # scanEvery throttles only the scan -> merge -> embed-update pipeline (redundant with the
           # notifier, which already polls presence for the same people); notify/follow always run every

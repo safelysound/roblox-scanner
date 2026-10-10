@@ -40,11 +40,15 @@ Cookies are read from environment variables (see `cookies.example.txt`); without
 ## Pausing between events
 
 Set `settings.paused: true` in `config/trackers.yaml` to stop all automatic activity — no scans, no Discord
-posts, no Roblox API calls, nothing to rate-limit — without touching any code or GitHub secrets. The
-automatic cron dispatch (`tracker` unset or `all`) does nothing while paused; the run completes in a few
-seconds with empty job matrices. A manual dispatch for one specific tracker (e.g. `tracker: admin`) always
-runs regardless, so testing and prep work between events isn't affected. Set it back to `false` when the
-next event starts.
+posts, no Roblox API calls, nothing to rate-limit — without touching any code or GitHub secrets. A manual
+dispatch for one specific tracker (e.g. `tracker: admin`) always runs regardless, so testing and prep work
+between events isn't affected. Set it back to `false` when the next event starts.
+
+**Exception:** any tracker with `anyGame: true` (see below) keeps running automatically even while paused —
+scan on its own `scanEvery` cadence, notify and follow every tick — since that's the whole point of
+`anyGame`: continuous real test traffic between events. A tracker with `anyGame` unset/false (Developers,
+and whichever trackers go back to being real production for the next event) stays fully stopped. If no
+tracker has `anyGame: true`, a paused automatic dispatch does nothing at all, same as before.
 
 ## Config — add a tracker without touching the workflow
 
