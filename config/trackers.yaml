@@ -72,7 +72,8 @@ notifiers:
     roleId: "1552512715443146805"
     emoji: "<:roblox:1551329066337050754>"
     webhookSecret: DISCORD_WEBHOOK_DEVELOPER_JOINS
-    interval: 16
+    shards: 1
+    interval: 5
 
   admin:
     tracker: admin
@@ -81,7 +82,8 @@ notifiers:
     roleId: "1552548764021956748"
     emoji: "<:roblox:1551329066337050754>"
     webhookSecret: DISCORD_WEBHOOK_ADMIN_JOINS
-    interval: 60
+    shards: 4
+    interval: 16
 
   video-stars:
     tracker: video-stars
@@ -90,7 +92,8 @@ notifiers:
     roleId: "1552548815268221009"
     emoji: "<:verified:1551329029783691334>"
     webhookSecret: DISCORD_WEBHOOK_VIDEO_STAR_JOINS
-    interval: 25
+    shards: 2
+    interval: 9
 
 settings:
   targetPlaceId: 116463962153167

@@ -157,12 +157,8 @@ def _get_csrf_from_session(sess):
     return None
 
 def _profile_shows_hunt(user_id, headers, target_place_id=DEFAULT_PLACE_ID, target_universe_id=DEFAULT_UNIVERSE_ID, prefer_cookie=""):
-    """Lightweight single-GET profile HTML fallback for hidden InGame users.
-
-    Batch presence across the full cookie pool already ran in fetch_presences(), so never re-hammer
-    presence.roblox.com per user/per cookie here (which would trigger thousands of calls on large groups).
-    """
-    import requests as _req, sys
+    """Check only embedded JSON presence payloads on a profile page — never global promo tags like data-purple."""
+    import re as _re, requests as _req, sys
     target_pid_s = str(target_place_id)
     ck = prefer_cookie
     if not ck:
@@ -179,16 +175,18 @@ def _profile_shows_hunt(user_id, headers, target_place_id=DEFAULT_PLACE_ID, targ
             h2["Cookie"] = ck
         r = _req.get(f"https://www.roblox.com/users/{user_id}/profile", timeout=6, headers=h2)
         if r.status_code == 200:
-            t = r.text
+            # Strip global HTML/meta tags (e.g. sitewide data-purple event links on every Roblox page)
+            cleaned = _re.sub(r"<meta\b[^>]*>", "", r.text, flags=_re.IGNORECASE)
+            cleaned = _re.sub(r'data-[a-z0-9_-]+\s*=\s*"[^"]*"', "", cleaned, flags=_re.IGNORECASE)
             if (
-                target_pid_s in t
-                or (target_universe_id and str(target_universe_id) in t)
-                or (str(target_place_id) == str(DEFAULT_PLACE_ID) and DEFAULT_GAME_NAME in t)
-                or f"roblox.com/games/{target_pid_s}" in t
-                or f'"placeId":{target_pid_s}' in t
-                or f'"placeId":"{target_pid_s}"' in t
+                f'"placeId":{target_pid_s}' in cleaned
+                or f'"placeId":"{target_pid_s}"' in cleaned
+                or (target_universe_id and (
+                    f'"universeId":{target_universe_id}' in cleaned
+                    or f'"universeId":"{target_universe_id}"' in cleaned
+                ))
             ):
-                print(f"profile scrape {user_id}: found target game in HTML", file=sys.stderr)
+                print(f"profile scrape {user_id}: found embedded JSON target presence", file=sys.stderr)
                 return True
     except Exception as e:
         print(f"profile scrape {user_id} HTML error {e}", file=sys.stderr)

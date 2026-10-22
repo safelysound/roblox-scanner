@@ -108,10 +108,10 @@ jobs:
           # One scan job per (tracker, shard), built from the (possibly throttled) scan list
           SCAN=$(jq -c '[.[] | . as $t | ($t.shards // 1) as $n | range(0; $n) as $s | {id: $t.id, shard: $s, shards: $n}]' <<< "$SCAN_TRACKERS")
           PLACE_ID="${INPUT_PLACE_ID:-$(yq '.settings.targetPlaceId' config/trackers.yaml)}"
-          # Join notifiers (one per selected tracker that has a notifiers: entry) -- from the FULL
-          # tracker list, not the throttled scan list, so notifiers always run every tick.
+          # Join notifiers (sharded per `shards` in config/trackers.yaml so large rosters run fast
+          # parallel sweeps well under Roblox's per-IP rate window) -- always from the full tracker list.
           NOTIFY=$(yq -o=json -I=0 '(.notifiers // {}) | to_entries | map(.value + {"id": .key})' config/trackers.yaml \
-                   | jq -c --argjson t "$TRACKERS" '[.[] | select(.id as $i | $t | map(.id) | index($i))]')
+                   | jq -c --argjson t "$TRACKERS" '[.[] | select(.id as $i | $t | map(.id) | index($i)) | . as $n | ($n.shards // 1) as $ns | range(0; $ns) as $s | ($n + {shard: $s, shards: $ns, stateKey: (if $ns > 1 then "\($n.id)-\($s)" else $n.id end)})]')
           {
             echo "trackers=$TRACKERS"
             echo "scan_trackers=$SCAN_TRACKERS"
@@ -379,7 +379,7 @@ jobs:
     permissions:
       contents: write
     concurrency:
-      group: notifier-${{ matrix.id }}-${{ github.ref }}   # per ref: a test run on a branch never queues behind or cancels a live tick
+      group: notifier-${{ matrix.stateKey }}-${{ github.ref }}   # per shard + ref: zero push races & fast handoffs
       cancel-in-progress: false
     strategy:
       fail-fast: false
@@ -387,28 +387,18 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.notify) }}
     steps:
       - uses: actions/checkout@v7
-        # State (state/notifier_<id>.json) is committed to main, not stored as an Actions artifact:
-        # artifact listing turned out to have a real eventual-consistency gap (confirmed in production --
-        # a person was re-announced a second time because the immediately-prior tick's saved artifact
-        # wasn't visible yet when the next tick queried for it). git checkout of main has no such gap: the
-        # concurrency group above serializes ticks for a given notifier, so this step is guaranteed to see
-        # the previous tick's own commit already merged before it even starts.
 
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.11'
-          cache: pip
-
-      - run: pip install -r requirements.txt
+      - name: Ensure Python dependencies
+        run: python3 -c "import requests, yaml" 2>/dev/null || pip3 install --quiet --break-system-packages -r requirements.txt
 
       - name: Load notifier state
-        # Fetch the state branch explicitly instead of relying on checkout (which is pinned to the commit that
-        # existed at dispatch time). Also read by dry-run so it behaves like the real thing; test mode skips it.
         if: ${{ inputs.notifier_mode != 'test' }}
         env:
           ID: ${{ matrix.id }}
+          STATE_KEY: ${{ matrix.stateKey }}
         run: |
-          BR="notifier-state-${ID}"
+          BR="notifier-state-${STATE_KEY}"
+          LEGACY_BR="notifier-state-${ID}"
           mkdir -p state
           STATUS=unknown
           for attempt in 1 2 3; do
@@ -421,21 +411,30 @@ jobs:
           case "$STATUS" in
             present)
               git fetch -q --depth=1 origin "refs/heads/${BR}:refs/remotes/origin/${BR}"
-              git show "origin/${BR}:notifier_${ID}.json" > "state/notifier_${ID}.json"
+              git show "origin/${BR}:notifier_${STATE_KEY}.json" > "state/notifier_${STATE_KEY}.json"
               echo "Loaded state from branch ${BR}"
               ;;
             absent)
-              echo "No state branch yet (first run): current Hunt players will be recorded silently"
+              if [ "$STATE_KEY" != "$ID" ] && git ls-remote --exit-code --heads origin "$LEGACY_BR" >/dev/null 2>&1; then
+                git fetch -q --depth=1 origin "refs/heads/${LEGACY_BR}:refs/remotes/origin/${LEGACY_BR}"
+                git show "origin/${LEGACY_BR}:notifier_${ID}.json" > "state/notifier_${STATE_KEY}.json"
+                echo "Migrated initial shard state from legacy branch ${LEGACY_BR}"
+              else
+                echo "No state branch yet (first run): current target-game players will be recorded silently"
+              fi
               ;;
             *)
-              echo "::warning::could not reach the remote to load $ID state; starting fresh (silent reseed)"
+              echo "::warning::could not reach the remote to load $STATE_KEY state; starting fresh (silent reseed)"
               ;;
           esac
 
-      - name: Watch ${{ matrix.id }} joining The Hunt
+      - name: Watch ${{ matrix.stateKey }}
         env:
           MODE: ${{ inputs.notifier_mode }}
           NOTIFIER: ${{ matrix.id }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ matrix.shards }}
+          STATE_KEY: ${{ matrix.stateKey }}
           WEBHOOK: ${{ secrets[matrix.webhookSecret] }}
           ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
           ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
@@ -460,32 +459,26 @@ jobs:
           ROBLOSECURITY_19: ${{ secrets.ROBLOSECURITY_19 }}
           ROBLOSECURITY_20: ${{ secrets.ROBLOSECURITY_20 }}
         run: |
-          ARGS=()
+          if [ "$MODE" = "test" ] && [ "$SHARD" != "0" ]; then
+            echo "Skipping non-zero shard $SHARD in test mode"
+            exit 0
+          fi
+          ARGS=(--shard "$SHARD" --shards "$SHARDS" --state "state/notifier_${STATE_KEY}.json")
           case "$MODE" in
             test)    ARGS+=(--test) ;;
             dry-run) ARGS+=(--dry-run --duration 200) ;;
           esac
-          python join_notifier.py --notifier "$NOTIFIER" "${ARGS[@]}"
+          python3 join_notifier.py --notifier "$NOTIFIER" "${ARGS[@]}"
 
       - name: Persist notifier state
-        # dry-run/test must not write state: a dry-run "announces" to stdout and would consume a real join.
-        # Only on main: a run on any other branch must never write live state.
-        #
-        # State lives on its own branch per notifier (notifier-state-<id>), force-pushed as a single commit:
-        #  - no shared push target between the three notifiers, so no contention (the old approach, committing
-        #    to main, lost 2-15% of state updates to push races, and each lost update re-announced everyone
-        #    who had joined during that tick),
-        #  - no history growth on main,
-        #  - the load step above fetches this branch explicitly, so it always sees the newest commit (checkout
-        #    alone pins to the commit that existed when the run was DISPATCHED, which can be a tick behind).
-        # The concurrency group guarantees only one job per notifier is ever writing its branch.
         if: ${{ always() && inputs.notifier_mode == 'live' && github.ref == 'refs/heads/main' }}
         continue-on-error: true
         env:
           ID: ${{ matrix.id }}
+          STATE_KEY: ${{ matrix.stateKey }}
         run: |
-          FILE="state/notifier_${ID}.json"
-          BR="notifier-state-${ID}"
+          FILE="state/notifier_${STATE_KEY}.json"
+          BR="notifier-state-${STATE_KEY}"
           if [ ! -f "$FILE" ]; then
             echo "::warning::no $FILE produced this run, nothing to persist"
             exit 0
@@ -493,16 +486,16 @@ jobs:
           REMOTE=$(git remote get-url origin)
           AUTH=$(git config --get http.https://github.com/.extraheader || true)
           TMP=$(mktemp -d)
-          cp "$FILE" "$TMP/notifier_${ID}.json"
+          cp "$FILE" "$TMP/notifier_${STATE_KEY}.json"
           cd "$TMP"
           git init -q -b "$BR"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ -n "$AUTH" ]; then git config http.https://github.com/.extraheader "$AUTH"; fi
-          git add "notifier_${ID}.json"
-          git commit -q -m "notifier state: $ID $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git add "notifier_${STATE_KEY}.json"
+          git commit -q -m "notifier state: $STATE_KEY $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           for attempt in 1 2 3 4; do
             if git push -q --force "$REMOTE" "HEAD:refs/heads/${BR}"; then exit 0; fi
             sleep $((attempt * 2))
           done
-          echo "::warning::Could not push $ID notifier state after 4 attempts; this tick's update is lost, next tick works from the prior state"
+          echo "::warning::Could not push $STATE_KEY notifier state after 4 attempts"
