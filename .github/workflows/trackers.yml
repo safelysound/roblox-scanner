@@ -268,6 +268,8 @@ jobs:
             echo "::warning::Webhook secret '$SECRET_NAME' is not set, skipping Discord update for $TITLE"
             exit 0
           fi
+          # Pull the latest message ID list from origin/main before syncing so queued runs never miss overflow IDs
+          git fetch origin main 2>/dev/null && git checkout origin/main -- "$MSG_FILE" 2>/dev/null || true
           python discord_updater.py "$RESULTS" --webhook "$WEBHOOK" --message-id-file "$MSG_FILE" \
             --title "$TITLE" --color "$COLOR" --emoji "$EMOJI"
 
@@ -283,15 +285,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$MSG_FILE"
           if git diff --staged --quiet; then
-            echo "Message id unchanged"
+            echo "Message id(s) unchanged"
             exit 0
           fi
-          git commit -m "chore: update $ID message id [skip ci]"
-          for attempt in 1 2 3; do
-            if git pull --rebase origin main && git push origin HEAD:main; then exit 0; fi
+          git commit -m "chore: update $ID message ids [skip ci]"
+          for attempt in 1 2 3 4 5; do
+            if git fetch origin main && git rebase origin/main && git push origin HEAD:main; then exit 0; fi
+            git rebase --abort 2>/dev/null || true
             sleep $((attempt * 2))
           done
-          echo "::warning::Could not push the new $ID message id; the next run will post a new message"
+          echo "::warning::Could not push the updated $ID message ids; the next run will resync"
 
   # ---------------------------------------------------------------------------
   # Best-effort follow step. Bounded so a slow run can't pile up behind the next ones.

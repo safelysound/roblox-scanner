@@ -1,37 +1,33 @@
 #!/usr/bin/env python3
 """
-Discord webhook auto-editing updater for Roblox Group Scanner.
+Discord webhook multi-message auto-editing updater for Roblox Tracker channels.
 - Configurable title/color/emoji per tracker (Admin, Video Star, Developer)
-- Generates embed:
-  Title: <title>, Color: <color>
-  Description:
-    - <emoji> [DisplayName (@Username)](https://www.roblox.com/users/ID/profile)
-      - Playing: [The Hunt: Roblox 20](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20) (Must Follow to Join)  [if InGame Hunt via Follow]
-      - Playing: [The Hunt Roblox 20](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20) (Appearing Offline - Must Follow to Join)  [if Offline Hunt via Follow]
-      - Playing: [The Hunt: Roblox 20](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20)  [if InGame Hunt public, no Follow needed]
-      - Playing: **Unknown** (Must Follow/Game Status Hidden)  [if InGame hidden NOT Following, only if playing but not visible]
-    - Only Hunt (via Follow or public) + hidden InGame Unknown are shown; all else filtered per spec 2026-09-22:
-      * Online(1)/InStudio(3)/missing/null -> Do not show
-      * InGame hidden even when Following -> Do not show (e.g., 92501615)
-      * InGame hidden NOT Following -> Unknown (Must Follow/Game Status Hidden)
-      * InGame non-Hunt visible -> Do not show
-      * Offline -> Do not show except Offline Hunt via Follow
-    -# Last updated: <t:UNIX:R>
+- Generates standing embeds showing all visible target-game players + unfollowed Unknowns:
+  - <emoji> [DisplayName (@Username)](https://www.roblox.com/users/ID/profile)
+    - Playing: [The Hollow](https://www.roblox.com/games/116463962153167/The-Hollow) (Must Follow to Join)
+    - Playing: [The Hollow](https://www.roblox.com/games/116463962153167/The-Hollow) (Appearing Offline - Must Follow to Join)
+    - Playing: [The Hollow](https://www.roblox.com/games/116463962153167/The-Hollow)
+    - Playing: **Unknown** (Must Follow/Game Status Hidden)
+  -# Last updated: <t:UNIX:R>
 
-- Filters: ONLY Hunt visible via Following; everything else hidden
-- Pagination: if description >4000 chars, splits into 2+ embeds (up to 10), each title/color. Auto-reverts to 1 when fits. Total 6000.
-- First run: POST ?wait=true -> gets message_id, saves to file
-- Next runs: PATCH /messages/{id} to edit same message
+- Multi-message scaling & cleanup (bypasses Discord's 6,000-char per-message limit cleanly):
+  * Within a message: splits across embeds at <=3,950 UTF-16 code units per description (max 4,096).
+  * Across messages: whenever total text exceeds ~5,900 chars, overflows cleanly onto additional
+    webhook messages ("<Title> (1/N)", "<Title> (2/N)", ...), storing one message ID per line in
+    the tracker's message-id file.
+  * Automatic cleanup: as player count drops and fewer messages are needed, edits the remaining
+    standing message(s) in place and immediately DELETEs trailing overflow messages from Discord.
 """
 
 import argparse
 import json
 import os
+import re
 import sys
 import time
-import re
-import requests
 from pathlib import Path
+
+import requests
 
 from join_notifier import JOIN_REDIRECT_BASE, md_escape
 
@@ -41,27 +37,38 @@ TARGET_GAME_URL = "https://www.roblox.com/games/116463962153167/The-Hollow"
 TARGET_PLACE_ID = "116463962153167"
 TARGET_UNIVERSE_ID = 10770728771
 TARGET_GAME_NAME = "The Hollow"
-MAX_DESC = 4000
+MAX_DESC = 3950        # safely under Discord's 4,096 per-embed description limit
+MSG_CHAR_LIMIT = 5900  # safely under Discord's 6,000 total embed char limit per message
+MAX_EMBEDS_PER_MSG = 10
+
+
+def _discord_len(s: str) -> int:
+    """Conservative length matching Discord's limits across astral emojis / math-bold Unicode."""
+    if not s:
+        return 0
+    return max(len(s), len(s.encode("utf-16-le")) // 2)
+
 
 def parse_color(val):
     val = str(val).strip()
     if val.startswith("#"):
         val = val[1:]
-    # Try hex
     try:
         if len(val) <= 6 and all(c in "0123456789abcdefABCDEF" for c in val):
             return int(val, 16)
-    except:
+    except Exception:
         pass
     try:
         return int(val)
-    except:
+    except Exception:
         return DEFAULT_COLOR
 
+
 def slugify(name: str) -> str:
-    name = re.sub(r'[^a-zA-Z0-9]+', '-', name.strip())
-    name = re.sub(r'-+', '-', name).strip('-')
+    name = re.sub(r"[^a-zA-Z0-9]+", "-", name.strip())
+    name = re.sub(r"-+", "-", name).strip("-")
     return name or "Game"
+
 
 def get_game_link(place_id, universe_id, last_location: str, target_place_id: str = TARGET_PLACE_ID, target_game_name: str = None):
     if place_id:
@@ -78,22 +85,23 @@ def get_game_link(place_id, universe_id, last_location: str, target_place_id: st
         return raw_name, url
     return None, None
 
+
 def empty_message(title: str) -> str:
     t = title.lower()
-    if "developer" in t:
-        return "No developers currently in-game."
-    if "video" in t:
-        return "No Video Stars currently in-game."
-    if "admin" in t:
-        return "No admins currently in-game."
-    return "No one currently in-game."
+    if "video" in t or "star" in t:
+        return "No video stars are currently playing."
+    if "dev" in t:
+        return "No developers are currently playing."
+    return "No admins are currently playing."
 
-def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=ROBLOX_EMOJI, any_game=None):
+
+def _format_player_lines(data: dict, emoji: str = ROBLOX_EMOJI, any_game=None) -> list:
     target = data.get("target_game_players", [])
     other = data.get("other_game_players", [])
     meta = data.get("meta") or {}
     if any_game is None:
         any_game = bool(meta.get("anyGame", False))
+
     target_place = str(meta.get("targetPlaceId") or TARGET_PLACE_ID)
     raw_univ = meta.get("targetUniverseId")
     try:
@@ -124,49 +132,37 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
         ptype = u.get("presenceType")
         try:
             ptype_int = int(ptype) if ptype is not None else None
-        except:
+        except Exception:
             ptype_int = None
         is_following = bool(u.get("isFollowing"))
-        # Exclude Online, InStudio, missing/null per clarification
         if ptype_int in (1, 3) or ptype_int is None:
             continue
         if _is_target_visible(u):
             filtered.append(u)
             continue
-        # Hidden InGame cases
         if ptype_int == 2 and pid is None and u.get("universeId") is None:
             if is_following:
-                # InGame hidden even when Following (e.g., 92501615) -> Do not show
                 continue
-            else:
-                # InGame hidden NOT Following -> Keep as Unknown (Must Follow/Game Status Hidden) only if playing a game but not visible
-                # This matches "ONLY IF their status shows them playing a game but the game isn't already visible"
-                filtered.append(u)
-                continue
-        # All other Offline / hidden -> Do not show
-        continue
+            filtered.append(u)
 
-    # Sort by playing hierarchy: visible game (public) -> visible game (Must Follow) -> Unknown
     def sort_key(u):
         is_following = bool(u.get("isFollowing"))
         ptype = u.get("presenceType")
         try:
             ptype_int = int(ptype) if ptype is not None else None
-        except:
+        except Exception:
             ptype_int = None
         is_visible = _is_target_visible(u)
         if is_visible and not is_following and ptype_int == 2:
-            prio = 0  # Playing: <game> (public)
+            prio = 0
         elif is_visible and is_following:
-            prio = 1  # Playing: <game> (Must Follow to Join) + Appearing Offline
+            prio = 1
         elif is_visible and ptype_int == 0 and is_following:
             prio = 1
         elif is_visible:
-            prio = 0  # fallback public
+            prio = 0
         else:
-            prio = 2  # Unknown
-        # secondary sort: any_game groups by game name so people in the same game cluster together;
-        # otherwise (single fixed target) alphabetical by name is all that's meaningful
+            prio = 2
         name = (u.get("displayName") or u.get("username") or "").lower()
         if any_game:
             game = (u.get("gameName") or u.get("lastLocation") or "").lower()
@@ -174,13 +170,6 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
         return (prio, name)
 
     filtered = sorted(filtered, key=sort_key)
-
-    now = int(time.time())
-    footer = f"-# Last updated: <t:{now}:R>"
-
-    # Empty case — tracker-specific no-players line
-    if not filtered:
-        return [{"title": title, "color": color, "description": f"{empty_message(title)}\n{footer}"}]
 
     lines = []
     for u in filtered:
@@ -201,146 +190,184 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
         ptype = u.get("presenceType")
         try:
             ptype_int = int(ptype) if ptype is not None else None
-        except:
+        except Exception:
             ptype_int = None
 
         if _is_target_visible(u):
             label = md_escape(game_name or "Game")
             if ptype_int == 0:
-                # Offline but shown via Following = Appearing Offline (no colon per spec)
                 playing = f"[{label}]({game_url}) (Appearing Offline - Must Follow to Join)"
             elif is_following:
-                # InGame visible when Following (requires Follow to see) -> Must Follow to Join with colon
                 playing = f"[{label}]({game_url}) (Must Follow to Join)"
             else:
-                # InGame shown without being follow-checked (public) -> plain game link per clarification
                 playing = f"[{label}]({game_url})"
-            # any_game mode: also surface the specific server, since there's no single game to assume --
-            # the whole point here is per-person game *and* server. Same redirector the notifier uses.
             if any_game and job_id and pid_check:
                 join_link = f"{JOIN_REDIRECT_BASE}?placeId={pid_check}&gameInstanceId={job_id}"
                 playing += f" \u00b7 [Join \u2197]({join_link})"
         else:
-            # Hidden InGame NOT Following -> Unknown (Must Follow/Game Status Hidden) only if playing but not visible
             playing = "**Unknown** (Must Follow/Game Status Hidden)"
 
-        line = f"- {emoji} [{display} (@{username})]({profile})\n  - Playing: {playing}"
-        lines.append(line)
+        lines.append(f"- {emoji} [{display} (@{username})]({profile})\n  - Playing: {playing}")
 
-    # Discord caps the sum of all embed text (titles included) at 6000; each embed repeats the title.
-    # A 6000-char budget can span at most 2 description chunks, so reserve room for 2 titles.
-    TOTAL_LIMIT = 6000 - 2 * len(title)
-    filtered_lines = []
-    running_total = 0
-    truncated = 0
-    for line in lines:
-        ll = len(line) + 1
-        if running_total + ll + len(footer) + 1 > TOTAL_LIMIT:
-            truncated = len(lines) - len(filtered_lines)
-            break
-        filtered_lines.append(line)
-        running_total += ll
-    lines = filtered_lines
+    return lines
 
+
+def _pack_lines_into_messages(
+    lines: list,
+    title: str,
+    color: int,
+    footer: str,
+    msg_char_limit: int = MSG_CHAR_LIMIT,
+    max_desc: int = MAX_DESC,
+) -> list:
+    """Split player lines into 1..N Discord messages, each strictly within 4,096/embed & 6,000/message."""
     if not lines:
-        desc = f"{empty_message(title)}\n{footer}"
-        if truncated > 0:
-            desc += f"\n-# +{truncated} more not shown (6000 limit)"
-        return [{"title": title, "color": color, "description": desc}]
+        return [[{"title": title, "color": color, "description": f"{empty_message(title)}\n{footer}"}]]
 
-    chunks = []
-    cur = []
-    cur_len = 0
-    for line in lines:
-        ll = len(line) + 1
-        if cur and cur_len + ll > MAX_DESC:
-            chunks.append(cur)
-            cur = []
-            cur_len = 0
-        cur.append(line)
-        cur_len += ll
-    if cur:
-        chunks.append(cur)
+    title_budget = _discord_len(title) + 16   # reserves room for " (99/99)" on multi-message pages
+    footer_budget = _discord_len(footer) + 1
+    max_single_line = max(200, max_desc - footer_budget - 4)
 
-    embeds = []
-    for i, chunk in enumerate(chunks):
-        is_last = (i == len(chunks) - 1)
-        desc = "\n".join(chunk)
-        if is_last:
-            if len(desc) + 1 + len(footer) > MAX_DESC:
-                while chunk and len("\n".join(chunk)) + 1 + len(footer) > MAX_DESC:
-                    last_line = chunk.pop()
-                    if chunk:
-                        embeds.append({"title": title, "color": color, "description": "\n".join(chunk)})
-                        chunk = [last_line]
-                    else:
-                        chunk = [last_line[:MAX_DESC - len(footer) - 10] + "..."]
-                        break
-                desc = "\n".join(chunk) + f"\n{footer}"
-                embeds.append({"title": title, "color": color, "description": desc})
-                continue
+    raw_messages = []   # list of messages, each message = list of embed line-lists
+    cur_msg = [[]]
+    cur_embed_len = 0
+    cur_msg_desc_len = 0
+
+    for raw_line in lines:
+        line = raw_line if _discord_len(raw_line) <= max_single_line else (raw_line[:max_single_line - 3] + "...")
+        line_len = _discord_len(line)
+        join_extra = line_len + (1 if cur_msg[-1] else 0)
+
+        msg_has_content = bool(cur_msg[0])
+        would_exceed_msg = title_budget + cur_msg_desc_len + join_extra + footer_budget > msg_char_limit
+        at_embed_cap = len(cur_msg) >= MAX_EMBEDS_PER_MSG - 1 and (cur_embed_len + join_extra > max_desc)
+
+        if msg_has_content and (would_exceed_msg or at_embed_cap):
+            raw_messages.append(cur_msg)
+            cur_msg = [[line]]
+            cur_embed_len = line_len
+            cur_msg_desc_len = line_len
+        elif cur_msg[-1] and cur_embed_len + join_extra > max_desc:
+            cur_msg.append([line])
+            cur_embed_len = line_len
+            cur_msg_desc_len += line_len
+        else:
+            cur_msg[-1].append(line)
+            cur_embed_len += join_extra
+            cur_msg_desc_len += join_extra
+
+    if cur_msg[0]:
+        raw_messages.append(cur_msg)
+
+    total_msgs = len(raw_messages)
+    messages = []
+    for m_idx, embed_chunks in enumerate(raw_messages):
+        msg_title = title if total_msgs == 1 else f"{title} ({m_idx + 1}/{total_msgs})"
+        embeds = []
+        for c_idx, chunk in enumerate(embed_chunks):
+            desc = "\n".join(chunk)
+            is_last = c_idx == len(embed_chunks) - 1
+            if is_last:
+                if _discord_len(desc) + footer_budget <= max_desc:
+                    desc = f"{desc}\n{footer}"
+                    emb = {"color": color, "description": desc}
+                    if c_idx == 0:
+                        emb["title"] = msg_title
+                    embeds.append(emb)
+                else:
+                    # Last embed description is full; place footer in a clean trailing embed within the same message budget
+                    emb = {"color": color, "description": desc}
+                    if c_idx == 0:
+                        emb["title"] = msg_title
+                    embeds.append(emb)
+                    embeds.append({"color": color, "description": footer})
             else:
-                desc = f"{desc}\n{footer}" if desc else footer
-        embeds.append({"title": title, "color": color, "description": desc})
+                emb = {"color": color, "description": desc}
+                if c_idx == 0:
+                    emb["title"] = msg_title
+                embeds.append(emb)
+        messages.append(embeds)
 
-    if truncated > 0:
-        notice = f"\n-# +{truncated} more not shown (6000 char total limit)"
-        last = embeds[-1]
-        if len(last["description"]) + len(notice) > MAX_DESC:
-            last["description"] = last["description"][:MAX_DESC - len(notice) - 1] + notice
-        elif sum(len(e["description"]) for e in embeds) + len(notice) > TOTAL_LIMIT:
-            last["description"] = last["description"][:TOTAL_LIMIT - sum(len(e["description"]) for e in embeds[:-1]) - len(notice) - 1] + notice
-        else:
-            last["description"] += notice
+    return messages
 
-    if len(embeds) > 10:
-        embeds = embeds[:10]
-        last = embeds[-1]
-        notice = "\n... and more not shown (limit 10 embeds)"
-        if len(last["description"]) + len(notice) > MAX_DESC:
-            last["description"] = last["description"][:MAX_DESC - len(notice) - 1] + notice
-        else:
-            last["description"] += notice
 
-    return embeds
+def build_message_batches(
+    data: dict,
+    title: str = "Admin Tracker",
+    color: int = DEFAULT_COLOR,
+    emoji: str = ROBLOX_EMOJI,
+    any_game=None,
+    msg_char_limit: int = MSG_CHAR_LIMIT,
+    max_desc: int = MAX_DESC,
+) -> list:
+    """Return List[List[embed_dict]] — one inner list of embeds per Discord message needed."""
+    lines = _format_player_lines(data, emoji=emoji, any_game=any_game)
+    footer = f"-# Last updated: <t:{int(time.time())}:R>"
+    return _pack_lines_into_messages(lines, title=title, color=color, footer=footer, msg_char_limit=msg_char_limit, max_desc=max_desc)
+
+
+def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=ROBLOX_EMOJI, any_game=None) -> list:
+    """Backward-compatible helper returning the first message's embeds."""
+    return build_message_batches(data, title=title, color=color, emoji=emoji, any_game=any_game)[0]
+
+
+def load_message_ids(path: str) -> list:
+    """Load ordered list of Discord message IDs (one per line, JSON array, or single ID)."""
+    if not path:
+        return []
+    p = Path(path)
+    if not p.exists():
+        return []
+    try:
+        txt = p.read_text(encoding="utf-8").strip()
+        if not txt:
+            return []
+        try:
+            j = json.loads(txt)
+            if isinstance(j, list):
+                return [str(x).strip() for x in j if str(x).strip().isdigit()]
+            if isinstance(j, dict) and "id" in j and str(j["id"]).strip().isdigit():
+                return [str(j["id"]).strip()]
+            if isinstance(j, (int, str)) and str(j).strip().isdigit():
+                return [str(j).strip()]
+        except Exception:
+            pass
+        ids = []
+        seen = set()
+        for tok in txt.split():
+            t = tok.strip()
+            if t.isdigit() and t not in seen:
+                seen.add(t)
+                ids.append(t)
+        return ids
+    except Exception:
+        return []
+
+
+def save_message_ids(path: str, msg_ids: list):
+    clean = [str(m).strip() for m in msg_ids if str(m).strip()]
+    Path(path).write_text(("\n".join(clean) + "\n") if clean else "", encoding="utf-8")
+    print(f"Saved {len(clean)} message ID(s) {clean} to {path}")
+
 
 def load_message_id(path: str) -> str:
-    p = Path(path)
-    if p.exists():
-        try:
-            txt = p.read_text(encoding="utf-8").strip()
-            if txt.isdigit():
-                return txt
-            try:
-                j = json.loads(txt)
-                if isinstance(j, dict) and "id" in j:
-                    return str(j["id"])
-                if isinstance(j, str) and j.isdigit():
-                    return j
-            except:
-                pass
-            for line in txt.split():
-                if line.strip().isdigit():
-                    return line.strip()
-            return txt.strip().split()[0] if txt else ""
-        except:
-            return ""
-    return ""
+    ids = load_message_ids(path)
+    return ids[0] if ids else ""
+
 
 def save_message_id(path: str, msg_id: str):
-    Path(path).write_text(str(msg_id).strip(), encoding="utf-8")
-    print(f"Saved message ID {msg_id} to {path}")
+    save_message_ids(path, [msg_id] if msg_id else [])
 
-def _send(method: str, url: str, payload: dict, idempotent: bool, attempts: int = 3):
-    """requests.request with bounded retries.
 
-    Always retries HTTP 429 (honouring retry_after). Network errors and 5xx are only retried when the
-    call is idempotent (PATCH): retrying a POST after a timeout could create a duplicate message.
-    """
+def _send(method: str, url: str, payload: dict = None, idempotent: bool = True, attempts: int = 3):
+    """HTTP helper with bounded 429 + 5xx/network retries for idempotent operations."""
     last_exc = None
     for attempt in range(1, attempts + 1):
         try:
-            r = requests.request(method, url, json=payload, timeout=15)
+            kwargs = {"timeout": 15}
+            if payload is not None:
+                kwargs["json"] = payload
+            r = requests.request(method, url, **kwargs)
         except requests.RequestException as e:
             last_exc = e
             print(f"{method} attempt {attempt}/{attempts} failed: {type(e).__name__}", file=sys.stderr)
@@ -354,7 +381,7 @@ def _send(method: str, url: str, payload: dict, idempotent: bool, attempts: int 
                     wait = float(r.json().get("retry_after", 5))
                 except Exception:
                     wait = 5.0
-                print(f"Rate limited, retrying in {min(wait, 30):.1f}s", file=sys.stderr)
+                print(f"Rate limited on {method}, retrying in {min(wait, 30):.1f}s", file=sys.stderr)
                 time.sleep(min(wait, 30) + 0.5)
                 continue
             if idempotent and r.status_code >= 500:
@@ -362,67 +389,114 @@ def _send(method: str, url: str, payload: dict, idempotent: bool, attempts: int 
                 time.sleep(2 * attempt)
                 continue
         return r
-    raise last_exc  # pragma: no cover - loop always returns or raises
+    raise last_exc  # pragma: no cover
 
-def send_or_edit(webhook_url: str, embeds: list, message_id_file: str):
+
+def _delete_webhook_message(base_url: str, msg_id: str) -> bool:
+    """Delete an unneeded overflow webhook message. Returns True when confirmed gone (200/204/404)."""
+    try:
+        r = _send("DELETE", f"{base_url}/messages/{msg_id}", payload=None, idempotent=True)
+    except requests.RequestException as e:
+        print(f"DELETE .../messages/{msg_id} failed: {type(e).__name__}", file=sys.stderr)
+        return False
+    print(f"DELETE .../messages/{msg_id} -> {r.status_code}")
+    return r.status_code in (200, 204, 404)
+
+
+def _post_webhook_message(webhook_url: str, payload: dict) -> str:
+    separator = "&" if "?" in webhook_url else "?"
+    r = _send("POST", f"{webhook_url}{separator}wait=true", payload=payload, idempotent=False)
+    print(f"POST .../?wait=true -> {r.status_code}")
+    if r.status_code not in (200, 204):
+        raise RuntimeError(f"POST failed {r.status_code}: {r.text[:500]}")
+    msg_id = str(r.json().get("id", "")).strip()
+    if not msg_id:
+        raise RuntimeError("POST succeeded without returning a message ID")
+    print(f"Created message ID {msg_id}")
+    return msg_id
+
+
+def sync_messages(webhook_url: str, message_batches: list, message_id_file: str = "") -> list:
+    """Synchronize standing Discord webhook messages with `message_batches` (1..N messages).
+
+    - Edits existing messages in place via PATCH.
+    - Posts additional overflow messages below when >6,000 chars are needed.
+    - Deletes trailing overflow messages immediately when no longer needed.
+    - If an earlier message was manually deleted (404), removes stale downstream messages first so
+      top-to-bottom message order (1/N -> 2/N -> ...) never inverts.
+    """
     webhook_url = (webhook_url or "").strip() or os.environ.get("DISCORD_WEBHOOK", "") or os.environ.get("DISCORD_WEBHOOK_URL", "")
     if not webhook_url:
         print("No webhook URL provided (arg --webhook or env DISCORD_WEBHOOK)", file=sys.stderr)
         sys.exit(1)
-    payload = {"embeds": embeds}
+
     base = webhook_url.split("?")[0]
-    existing_id = load_message_id(message_id_file) if message_id_file else ""
+    existing_ids = load_message_ids(message_id_file) if message_id_file else []
+    active_ids = []
+    undeleted_tail = []
+    invalidated_from = None
 
-    if existing_id:
-        print(f"Found existing message ID {existing_id}, trying to edit...")
-        try:
-            r = _send("PATCH", f"{base}/messages/{existing_id}", payload, idempotent=True)
-        except requests.RequestException as e:
-            print(f"PATCH failed: {type(e).__name__}", file=sys.stderr)
-            sys.exit(1)
-        print(f"PATCH .../messages/{existing_id} -> {r.status_code}")
-        if r.status_code in (200, 204):
-            print("Edited existing message successfully.")
-            return existing_id
-        if r.status_code != 404:
-            print(f"Edit failed ({r.status_code}): {r.text[:500]}")
-            print("Edit failed, exiting without creating a duplicate.")
-            sys.exit(1)
-        print("Message not found (404), creating a new one...")
+    try:
+        for i, embeds in enumerate(message_batches):
+            payload = {"embeds": embeds}
+            if invalidated_from is None and i < len(existing_ids):
+                mid = existing_ids[i]
+                print(f"Message {i + 1}/{len(message_batches)}: editing existing ID {mid}...")
+                r = _send("PATCH", f"{base}/messages/{mid}", payload=payload, idempotent=True)
+                print(f"PATCH .../messages/{mid} -> {r.status_code}")
+                if r.status_code in (200, 204):
+                    active_ids.append(mid)
+                    continue
+                if r.status_code != 404:
+                    print(f"Edit failed ({r.status_code}): {r.text[:500]}", file=sys.stderr)
+                    final_ids = active_ids + existing_ids[i:]
+                    if message_id_file and final_ids != existing_ids:
+                        save_message_ids(message_id_file, final_ids)
+                    sys.exit(1)
+                print(f"Message {mid} was deleted (404); cleaning downstream messages to preserve order...")
+                invalidated_from = i
+                for stale_id in existing_ids[i + 1:]:
+                    if not _delete_webhook_message(base, stale_id):
+                        undeleted_tail.append(stale_id)
 
-    print("Creating new webhook message...")
-    separator = "&" if "?" in webhook_url else "?"
-    try:
-        r = _send("POST", f"{webhook_url}{separator}wait=true", payload, idempotent=False)
-    except requests.RequestException as e:
-        print(f"POST failed: {type(e).__name__}", file=sys.stderr)
+            new_id = _post_webhook_message(webhook_url, payload)
+            active_ids.append(new_id)
+    except Exception as e:
+        print(f"Webhook sync error: {e}", file=sys.stderr)
+        # Persist any newly created message IDs immediately so nothing gets orphaned
+        already = set(active_ids)
+        fallback_ids = active_ids + [x for x in existing_ids[len(active_ids):] if x not in already]
+        if message_id_file and fallback_ids and fallback_ids != existing_ids:
+            save_message_ids(message_id_file, fallback_ids)
         sys.exit(1)
-    print(f"POST .../?wait=true -> {r.status_code}")
-    if r.status_code not in (200, 204):
-        print(f"POST failed {r.status_code}: {r.text[:1000]}")
-        sys.exit(1)
-    try:
-        msg_id = str(r.json().get("id", ""))
-    except ValueError:
-        print(f"POST response not JSON: {r.text[:500]}")
-        return ""
-    if not msg_id:
-        print("POST succeeded but no ID in response.")
-        return ""
-    print(f"Created message ID {msg_id}")
-    if message_id_file:
-        save_message_id(message_id_file, msg_id)
-    return msg_id
+
+    if invalidated_from is None and len(existing_ids) > len(message_batches):
+        overflow_ids = existing_ids[len(message_batches):]
+        print(f"Cleaning up {len(overflow_ids)} unneeded overflow message(s): {overflow_ids}")
+        for extra_id in overflow_ids:
+            if not _delete_webhook_message(base, extra_id):
+                undeleted_tail.append(extra_id)
+
+    final_ids = active_ids + [x for x in undeleted_tail if x not in active_ids]
+    if message_id_file and final_ids != existing_ids:
+        save_message_ids(message_id_file, final_ids)
+    return final_ids
+
+
+def send_or_edit(webhook_url: str, embeds: list, message_id_file: str):
+    ids = sync_messages(webhook_url, [embeds], message_id_file)
+    return ids[0] if ids else ""
+
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Discord webhook updater - edit same message every 5 min")
+    ap = argparse.ArgumentParser(description="Discord multi-message webhook updater")
     ap.add_argument("json_file", nargs="?")
     ap.add_argument("--webhook", type=str, default="", help="Discord webhook URL (or env DISCORD_WEBHOOK)")
-    ap.add_argument("--message-id-file", type=str, default="discord_message_id.txt", help="File to store message ID")
+    ap.add_argument("--message-id-file", type=str, default="discord_message_id.txt", help="File to store message ID(s)")
     ap.add_argument("--title", type=str, default="Admin Tracker", help="Embed title")
     ap.add_argument("--color", type=str, default=str(DEFAULT_COLOR), help="Embed color (decimal or hex #RRGGBB)")
     ap.add_argument("--emoji", type=str, default=ROBLOX_EMOJI, help="Emoji for each line")
-    ap.add_argument("--dry-run", action="store_true", help="Just print embeds, don't send")
+    ap.add_argument("--dry-run", action="store_true", help="Print message batches without sending")
     args = ap.parse_args()
 
     data_path = None
@@ -442,13 +516,15 @@ if __name__ == "__main__":
     data = json.loads(data_path.read_text(encoding="utf-8"))
 
     color_int = parse_color(args.color)
-    embeds = build_embeds(data, title=args.title, color=color_int, emoji=args.emoji)
+    batches = build_message_batches(data, title=args.title, color=color_int, emoji=args.emoji)
 
     if args.dry_run:
-        print(json.dumps({"embeds": embeds}, indent=2))
-        print(f"\n# Embeds: {len(embeds)}, total chars: {sum(len(e['description']) for e in embeds)}", file=sys.stderr)
+        out = [{"embeds": b} for b in batches]
+        print(json.dumps(out[0] if len(out) == 1 else out, indent=2))
+        total_embeds = sum(len(b) for b in batches)
+        char_counts = [sum(_discord_len(e.get("title", "")) + _discord_len(e.get("description", "")) for e in b) for b in batches]
+        print(f"\n# Messages: {len(batches)}, total embeds: {total_embeds}, per-message chars: {char_counts}", file=sys.stderr)
         sys.exit(0)
 
     webhook = args.webhook or os.environ.get("DISCORD_WEBHOOK", "")
-    msg_id_file = args.message_id_file
-    send_or_edit(webhook, embeds, msg_id_file)
+    sync_messages(webhook, batches, args.message_id_file)
