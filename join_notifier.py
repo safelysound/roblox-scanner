@@ -61,6 +61,13 @@ def log(*a):
 
 # ---------------------------------------------------------------- presence
 
+# Shared per-runner IP rate-limit gate: Roblox presence.roblox.com enforces 60 req / 60s per runner IP
+# across ALL cookies simultaneously, so immediately failing over across 11 other cookies on a 429 just
+# fires 11 more instant 429s instead of letting the runner IP's 5s sliding sub-window refill once.
+_IP_GATE_LOCK = threading.Lock()
+_IP_BLOCKED_UNTIL = 0.0
+
+
 class Account:
     """Pool account with thread-local keep-alive HTTP sessions and shared CSRF/rate state."""
 
@@ -101,8 +108,12 @@ class Account:
 
     def presence(self, ids):
         """Presence dicts for ids, or None if the request failed."""
+        global _IP_BLOCKED_UNTIL
         sess = self._get_session()
-        for _ in range(2):
+        for attempt in range(3):
+            now_gate = time.time()
+            if _IP_BLOCKED_UNTIL > now_gate and _IP_BLOCKED_UNTIL - now_gate <= PAUSE_MAX_WAIT:
+                time.sleep(_IP_BLOCKED_UNTIL - now_gate)
             hdr = {"x-csrf-token": self.csrf} if self.csrf else {}
             with self._lock:
                 self.requests += 1
@@ -126,9 +137,16 @@ class Account:
                     wait = float(r.headers.get("retry-after", 5))
                 except ValueError:
                     wait = 5.0
+                until = time.time() + wait + 0.15
+                with _IP_GATE_LOCK:
+                    if until > _IP_BLOCKED_UNTIL:
+                        _IP_BLOCKED_UNTIL = until
                 with self._lock:
-                    self.blocked_until = max(self.blocked_until, time.time() + wait)
                     self.limited.append(wait)
+                if attempt == 0 and wait <= PAUSE_MAX_WAIT:
+                    continue
+                with self._lock:
+                    self.blocked_until = max(self.blocked_until, until)
                     self.errors += 1
                 log(f"{self.key}: rate limited, pausing {wait:.0f}s")
                 return None
@@ -221,8 +239,8 @@ def poll(
     pool_exec = ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(live)))) if own_exec else executor
 
     try:
-        # On poll 0 / every 12th poll for small rosters, include an Appearing-Offline sweep across follower accounts
-        appearing_offline_sweep = len(ids) <= WIDE_THRESHOLD and (poll_no == 0 or poll_no % 12 == 0)
+        # Only probe Appearing-Offline followers on seed poll 0 and once per minute thereafter
+        appearing_offline_sweep = len(ids) <= WIDE_THRESHOLD and (poll_no == 0 or poll_no % 15 == 0)
 
         pinned_buckets = {}
         unpinned_ids = []
