@@ -40,7 +40,7 @@ DEFAULT_UNIVERSE_ID = 10766456501
 GROUP_API = "https://groups.roblox.com/v1/groups/{group_id}/users"
 GROUP_PAGE_LIMIT = 100
 
-def _request_with_backoff(session, method, url, max_retries=5, **kwargs):
+def _request_with_backoff(session, method, url, max_retries=6, **kwargs):
     import random
     for attempt in range(1, max_retries+1):
         try:
@@ -48,13 +48,18 @@ def _request_with_backoff(session, method, url, max_retries=5, **kwargs):
             if resp.status_code == 429:
                 retry = resp.headers.get("Retry-After")
                 try:
-                    wait = int(float(retry)) if retry else (2 ** attempt)
-                except:
-                    wait = 2 ** attempt
-                time.sleep(wait + random.uniform(0,1))
+                    ra = float(retry) if retry else 0.0
+                except ValueError:
+                    ra = 0.0
+                # groups.roblox.com sliding windows need ~12s per attempt (Retry-After often reports 5s early)
+                wait = max(ra, 12.0)
+                time.sleep(wait + random.uniform(0, 1))
+                continue
+            if resp.status_code >= 500 and attempt < max_retries:
+                time.sleep(2 * attempt)
                 continue
             return resp
-        except:
+        except Exception:
             if attempt == max_retries:
                 return None
             time.sleep(1+attempt)
@@ -71,12 +76,15 @@ def fetch_group_members(group_id, max_members=None, delay=0.6, verbose=False):
     members=[]
     cursor=""
     page=0
-    # memberCount for logging
+    expected_count = None
+    # memberCount for logging and truncation detection
     try:
         r = _request_with_backoff(sess, "GET", f"https://groups.roblox.com/v1/groups/{group_id}")
-        if r and r.status_code==200 and verbose:
-            print(f"Group {group_id} reports {r.json().get('memberCount')} members", file=sys.stderr)
-    except:
+        if r and r.status_code==200:
+            expected_count = r.json().get("memberCount")
+            if verbose:
+                print(f"Group {group_id} reports {expected_count} members", file=sys.stderr)
+    except Exception:
         pass
     while True:
         page+=1

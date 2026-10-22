@@ -39,10 +39,10 @@ def _normalize(raw):
 
 def get_all_cookies():
     pool=[]; seen=set()
-    keys = ["ROBLOX_COOKIE", "ROBLOSECURITY"] + [f"ROBLOSECURITY_{i}" for i in range(1, 21)]
-    # Reverse pool order so newer accounts (fewer followings) absorb new follows first instead of
-    # overloading ROBLOX_COOKIE alone.
-    for k in reversed(keys):
+    # Keep aged/verified accounts first (ROBLOX_COOKIE, ROBLOSECURITY, ROBLOSECURITY_1..20): newer unverified
+    # accounts receive '403 Challenge is required' from datacenter IPs while consuming the runner IP's
+    # ~2 follows / 60s sliding window before verified accounts get a chance.
+    for k in ["ROBLOX_COOKIE", "ROBLOSECURITY"] + [f"ROBLOSECURITY_{i}" for i in range(1, 21)]:
         v=os.environ.get(k,"")
         if v and v.strip():
             v=_normalize(v)
@@ -76,11 +76,11 @@ def follow_one(sess, uid):
                 return ("already", r.status_code, r.text[:200])
             if r.status_code==429:
                 retry_after=r.headers.get("Retry-After")
-                try: wait=int(float(retry_after)) if retry_after else 42
-                except: wait=42
-                # friends.roblox.com enforces ~2 follows / ~40s per runner IP while returning Retry-After: 5;
-                # waiting at least 42s lets the IP sliding window refill instead of burning 16 fast retries.
-                return ("retry", max(wait, 42), f"429 {r.text[:120]}")
+                try: wait=int(float(retry_after)) if retry_after else 62
+                except: wait=62
+                # friends.roblox.com enforces ~2 POST /follow per ~60s per runner IP while returning Retry-After: 5;
+                # waiting 62s lets the full 60s IP window refill instead of burning consecutive retries.
+                return ("retry", max(wait, 62), f"429 {r.text[:120]}")
             if r.status_code==403:
                 body=r.text.lower()
                 if "x-csrf-token" in r.headers and csrf_try == 0 and "challenge" not in body:
@@ -196,10 +196,11 @@ def main():
         s.cookies.set(".ROBLOSECURITY", ck, domain=".roblox.com")
         tok=get_csrf(s)
         if tok: s.headers["x-csrf-token"]=tok
-        sessions.append({"key":k, "sess":s, "follows":0, "cooldown_until":0})
+        sessions.append({"key":k, "sess":s, "follows":0, "cooldown_until":0, "dead":False})
 
     total=len(unknowns)
     idx=0
+    rr_idx=0
     attempts=0
     start=time.time()
     deadline=start+args.max_seconds
@@ -210,39 +211,43 @@ def main():
     consec_429=0        # 429 rate-limit answers in a row
     abort_after=2*len(pool)
     stop_reason=""
-    # Round-robin, 2 follows per account then a 30s cooldown for that account
+    # True round-robin across non-challenged accounts, 2 follows per account then a 30s cooldown
     while idx < len(unknowns):
         if time.time() >= deadline:
             stop_reason=f"time budget of {args.max_seconds}s reached"
             break
         uid=unknowns[idx]
         now=time.time()
-        # Find available session
+        live_sessions=[s for s in sessions if not s["dead"]]
+        if not live_sessions:
+            stop_reason="all accounts hit challenge/auth block this run"
+            break
         avail=None
         earliest=None
-        for sess in sessions:
+        for step in range(len(sessions)):
+            cand_i = (rr_idx + step) % len(sessions)
+            sess = sessions[cand_i]
+            if sess["dead"]:
+                continue
             if now < sess["cooldown_until"]:
-                # still cooling
                 if earliest is None or sess["cooldown_until"] < earliest:
                     earliest=sess["cooldown_until"]
                 continue
-            # if cooldown expired, reset follows
-            if sess["cooldown_until"] !=0 and now >= sess["cooldown_until"]:
+            if sess["cooldown_until"] != 0 and now >= sess["cooldown_until"]:
                 sess["follows"]=0
                 sess["cooldown_until"]=0
             if sess["follows"] < 2:
                 avail=sess
+                rr_idx = cand_i
                 break
         if avail is None:
-            # all on cooldown, wait until earliest (but never past the deadline)
-            wait = max(0, earliest - now) + 0.2
+            wait = max(0, (earliest or now) - now) + 0.2
             if now + wait >= deadline:
                 stop_reason=f"time budget of {args.max_seconds}s reached"
                 break
-            print(f"All {len(pool)} accounts on cooldown (2/2), waiting {wait:.1f}s until {earliest:.0f}...", file=sys.stderr)
+            print(f"All {len(live_sessions)} active accounts on cooldown (2/2), waiting {wait:.1f}s until {earliest:.0f}...", file=sys.stderr)
             time.sleep(wait)
             continue
-        # Attempt follow with avail
         key=avail["key"]; sess=avail["sess"]
         print(f"[{idx+1}/{total}] Follow {uid} via {key} ({avail['follows']+1}/2, cooldown {avail['cooldown_until']:.0f})...", flush=True, file=sys.stderr)
         status, code, msg = follow_one(sess, uid)
@@ -256,9 +261,9 @@ def main():
             avail["follows"]+=1
             if avail["follows"] >= 2:
                 avail["cooldown_until"]=time.time()+30
+                rr_idx = (rr_idx + 1) % len(sessions)
                 print(f"  {key} reached 2/2, cooling 30s until {avail['cooldown_until']:.0f}", file=sys.stderr)
             idx+=1
-            # small jitter between follows to avoid 429
             time.sleep(random.uniform(0.6,1.2))
             continue
         if status=="retry":
@@ -268,23 +273,28 @@ def main():
             if consec_429 >= abort_after:
                 stop_reason=f"{consec_429} rate-limit (429) answers in a row; backing off until the next run"
                 break
-            # treat as cooldown for this account
             avail["cooldown_until"]=time.time()+ max(wait,30)
             avail["follows"]=0
-            time.sleep(min(wait, max(0, deadline-time.time())))
+            rr_idx = (rr_idx + 1) % len(sessions)
+            if time.time() + wait >= deadline:
+                stop_reason=f"time budget of {args.max_seconds}s reached while waiting for 60s follow window"
+                break
+            time.sleep(wait)
             continue
-        # challenge / fail / error: count against this user and against the run
+        # challenge / fail / error
         consec_fail+=1
-        tries[uid]=tries.get(uid,0)+1
         if status=="challenge":
-            print(f"  -> 403 challenge {msg[:120]} -> cooling {key} 30s", file=sys.stderr)
-            avail["cooldown_until"]=time.time()+30
-            avail["follows"]=0
-            time.sleep(1)
-        else:
-            print(f"  -> {status} {code} {msg[:200]} -> cooling {key} 5s", file=sys.stderr)
-            avail["cooldown_until"]=time.time()+5
-            time.sleep(1)
+            # Retire challenged account for the rest of this run (don't count against uid or loop back to it!)
+            print(f"  -> 403 challenge on {key} -> retiring {key} for this run and trying next account", file=sys.stderr)
+            avail["dead"]=True
+            rr_idx = (rr_idx + 1) % len(sessions)
+            time.sleep(0.8)
+            continue
+        tries[uid]=tries.get(uid,0)+1
+        print(f"  -> {status} {code} {msg[:200]} -> cooling {key} 5s", file=sys.stderr)
+        avail["cooldown_until"]=time.time()+5
+        rr_idx = (rr_idx + 1) % len(sessions)
+        time.sleep(1)
         if consec_fail >= abort_after:
             stop_reason=f"{consec_fail} attempts in a row failed (last: {status} {code}); all accounts look blocked"
             break

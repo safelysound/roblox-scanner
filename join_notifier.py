@@ -543,16 +543,36 @@ def resolve_ids(tracker, st):
     if tracker.get("idsFile"):
         ids = list(load_user_ids(tracker["idsFile"]))
     elif tracker.get("groupId"):
-        if st.get("members") and time.time() - st.get("members_ts", 0) < MEMBERS_TTL:
-            ids = list(st["members"])
+        gid = int(tracker["groupId"])
+        prev = list(st.get("members") or [])
+        expected = None
+        try:
+            rg = requests.get(f"https://groups.roblox.com/v1/groups/{gid}", timeout=10, headers={"User-Agent": UA})
+            if rg.status_code == 200:
+                expected = rg.json().get("memberCount")
+        except Exception:
+            pass
+        cache_complete = (not expected) or len(prev) >= expected * 0.9
+        if prev and cache_complete and time.time() - st.get("members_ts", 0) < MEMBERS_TTL:
+            ids = prev
         else:
-            members = fetch_group_members(int(tracker["groupId"]))
-            ids = [m["userId"] for m in members if m.get("userId")]
-            if ids:
-                st["members"], st["members_ts"] = ids, time.time()
+            if prev and not cache_complete:
+                log(f"cached member list looks truncated ({len(prev)} < {expected}), re-fetching full group {gid}")
+            members = fetch_group_members(gid)
+            fetched = [m["userId"] for m in members if m.get("userId")]
+            is_complete = fetched and ((not expected and len(fetched) >= len(prev) * 0.9) or (expected and len(fetched) >= expected * 0.9))
+            if is_complete:
+                st["members"], st["members_ts"] = fetched, time.time()
+                ids = fetched
                 log(f"fetched {len(ids)} group members")
+            elif fetched:
+                # Partial pagination: merge with previous roster without locking in a 1h TTL so next run retries
+                merged = list(dict.fromkeys(prev + fetched))
+                st["members"] = merged
+                ids = merged
+                log(f"partial group fetch ({len(fetched)}/{expected or '?'}); keeping merged {len(ids)} members for retry next tick")
             else:
-                ids = list(st.get("members", []))  # fetch failed: keep using the old list
+                ids = prev
     else:
         ids = []
     ids += [int(u) for u in tracker.get("extraIds", [])]
