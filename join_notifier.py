@@ -41,6 +41,7 @@ from developer_scanner import (
     load_user_ids,
     resolve_game_name,
 )
+from sync_developer_ids import fetch_group_sources
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 PENDING_MAX_AGE = 600     # drop unsent pending entry after 10 minutes
@@ -49,6 +50,7 @@ HIDDEN_RETRY_TTL = 150    # cool down confirmed unseeable hidden users for 150s
 PAUSE_MAX_WAIT = 6        # max wait when all accounts briefly pause on 429
 SEED_MAX_WAIT = 60        # max seconds to wait before sealing baseline seed
 MEMBERS_TTL = 3600        # refresh group roster hourly
+GROUP_SOURCES_TTL = 900   # refresh lightweight developer groupSources every 15 min
 FOLLOWERS_TTL = 3600      # refresh account->followings map hourly
 MAX_WORKERS = 6           # parallel presence worker threads per runner
 BATCH_STAGGER = 0.06      # gentle burst spacing (seconds) across concurrent worker submits
@@ -703,8 +705,25 @@ def parse_color(c):
 
 def resolve_ids(tracker, st, shard=0, shards=1):
     """Return full deduplicated user list, filtered deterministically to `uid % shards == shard`."""
+    ids = []
     if tracker.get("idsFile"):
-        ids = list(load_user_ids(tracker["idsFile"]))
+        ids.extend(load_user_ids(tracker["idsFile"]))
+    if tracker.get("groupSources"):
+        prev = list(st.get("members") or [])
+        if prev and time.time() - st.get("members_ts", 0) < GROUP_SOURCES_TTL:
+            ids.extend(prev)
+        else:
+            try:
+                synced = [m["userId"] for m in fetch_group_sources(tracker["groupSources"]) if m.get("userId")]
+            except Exception as e:
+                log(f"groupSources fetch warning: {type(e).__name__}")
+                synced = []
+            if synced:
+                st["members"], st["members_ts"] = synced, time.time()
+                ids.extend(synced)
+                log(f"synced {len(synced)} groupSources members")
+            elif prev:
+                ids.extend(prev)
     elif tracker.get("groupId"):
         gid = int(tracker["groupId"])
         prev = list(st.get("members") or [])
@@ -717,7 +736,7 @@ def resolve_ids(tracker, st, shard=0, shards=1):
             pass
         cache_complete = (not expected) or len(prev) >= expected * 0.9
         if prev and cache_complete and time.time() - st.get("members_ts", 0) < MEMBERS_TTL:
-            ids = prev
+            ids.extend(prev)
         else:
             if prev and not cache_complete:
                 log(f"cached member list looks truncated ({len(prev)} < {expected}), re-fetching full group {gid}")
@@ -726,17 +745,15 @@ def resolve_ids(tracker, st, shard=0, shards=1):
             is_complete = fetched and ((not expected and len(fetched) >= len(prev) * 0.9) or (expected and len(fetched) >= expected * 0.9))
             if is_complete:
                 st["members"], st["members_ts"] = fetched, time.time()
-                ids = fetched
-                log(f"fetched {len(ids)} group members")
+                ids.extend(fetched)
+                log(f"fetched {len(fetched)} group members")
             elif fetched:
                 merged = list(dict.fromkeys(prev + fetched))
                 st["members"] = merged
-                ids = merged
-                log(f"partial group fetch ({len(fetched)}/{expected or '?'}); keeping merged {len(ids)} members for retry next tick")
+                ids.extend(merged)
+                log(f"partial group fetch ({len(fetched)}/{expected or '?'}); keeping merged {len(merged)} members for retry next tick")
             else:
-                ids = prev
-    else:
-        ids = []
+                ids.extend(prev)
     ids += [int(u) for u in tracker.get("extraIds", [])]
     deduped = list(dict.fromkeys(int(u) for u in ids))
     if shards > 1:

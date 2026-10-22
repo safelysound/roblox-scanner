@@ -49,7 +49,14 @@ trackers:
   - id: developers
     name: Developer Tracker
     idsFile: config/developer_ids.txt
-    shards: 1  # small list (~100 IDs): one job is faster than three
+    groupSources:
+      - groupId: 4111519   # Roblox Presents (The Hollow creator) — Developer, Admin, Owner
+        minRank: 200
+      - groupId: 33163515  # Twin Atlas Events — Developer, Manager, Administrator, Director
+        minRank: 252
+      - groupId: 15556721  # Twin Atlas — Developer, Manager, Administrator, Director, Executive, Twin Atlas
+        minRank: 250
+    shards: 1  # single scan job syncs groupSources + scans full developer roster
     color: "#000000"
     emoji: "<:developer:1551388816324169838>"
     webhookSecret: DISCORD_WEBHOOK_DEVELOPERS
@@ -72,7 +79,7 @@ notifiers:
     roleId: "1552512715443146805"
     emoji: "<:roblox:1551329066337050754>"
     webhookSecret: DISCORD_WEBHOOK_DEVELOPER_JOINS
-    shards: 1
+    shards: 2
     interval: 4
 
   admin:
