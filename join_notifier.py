@@ -41,7 +41,6 @@ from developer_scanner import (
     load_user_ids,
     resolve_game_name,
 )
-from sync_developer_ids import fetch_group_sources
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 PENDING_MAX_AGE = 600     # drop unsent pending entry after 10 minutes
@@ -50,7 +49,6 @@ HIDDEN_RETRY_TTL = 150    # cool down confirmed unseeable hidden users for 150s
 PAUSE_MAX_WAIT = 6        # max wait when all accounts briefly pause on 429
 SEED_MAX_WAIT = 60        # max seconds to wait before sealing baseline seed
 MEMBERS_TTL = 3600        # refresh group roster hourly
-GROUP_SOURCES_TTL = 900   # refresh lightweight developer groupSources every 15 min
 FOLLOWERS_TTL = 3600      # refresh account->followings map hourly
 MAX_WORKERS = 6           # parallel presence worker threads per runner
 BATCH_STAGGER = 0.06      # gentle burst spacing (seconds) across concurrent worker submits
@@ -708,23 +706,7 @@ def resolve_ids(tracker, st, shard=0, shards=1):
     ids = []
     if tracker.get("idsFile"):
         ids.extend(load_user_ids(tracker["idsFile"]))
-    if tracker.get("groupSources"):
-        prev = list(st.get("members") or [])
-        if prev and time.time() - st.get("members_ts", 0) < GROUP_SOURCES_TTL:
-            ids.extend(prev)
-        else:
-            try:
-                synced = [m["userId"] for m in fetch_group_sources(tracker["groupSources"]) if m.get("userId")]
-            except Exception as e:
-                log(f"groupSources fetch warning: {type(e).__name__}")
-                synced = []
-            if synced:
-                st["members"], st["members_ts"] = synced, time.time()
-                ids.extend(synced)
-                log(f"synced {len(synced)} groupSources members")
-            elif prev:
-                ids.extend(prev)
-    elif tracker.get("groupId"):
+    if tracker.get("groupId"):
         gid = int(tracker["groupId"])
         prev = list(st.get("members") or [])
         expected = None

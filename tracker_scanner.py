@@ -35,7 +35,6 @@ from developer_scanner import (
     resolve_universe_id,
     resolve_game_name,
 )
-from sync_developer_ids import fetch_group_sources
 
 DEFAULT_PLACE_ID = 116463962153167
 DEFAULT_UNIVERSE_ID = 10770728771
@@ -221,12 +220,6 @@ def tracker_main_logic():
             print(f"Tracker {args.tracker or group_id}: fetching group {group_id}", file=sys.stderr)
         group_members = fetch_group_members(group_id, max_members=args.max_members, delay=0.6, verbose=verbose)
         all_members.extend(group_members)
-    if getattr(args, "_group_sources", None):
-        if verbose:
-            print(f"Tracker {args.tracker}: syncing {len(args._group_sources)} groupSources", file=sys.stderr)
-        src_members = fetch_group_sources(args._group_sources, verbose=verbose)
-        group_members.extend(src_members)
-        all_members.extend(src_members)
     file_ids=[]
     if ids_file and Path(ids_file).exists():
         file_ids = load_user_ids(ids_file)

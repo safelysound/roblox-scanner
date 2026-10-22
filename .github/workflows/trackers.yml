@@ -178,11 +178,6 @@ jobs:
         run: |
           ARGS=()
           if [ -n "$MAX_MEMBERS" ]; then ARGS+=(--max-members "$MAX_MEMBERS"); fi
-          if [ "$TRACKER" = "developers" ] && [ "$SHARD" = "0" ] && [ -z "$MAX_MEMBERS" ]; then
-            python sync_developer_ids.py --tracker "$TRACKER" --ids-file config/developer_ids.txt --verbose
-            cp config/developer_ids.txt synced_developer_ids.txt
-            ARGS+=(--skip-group-sources)
-          fi
           OUT="shard_${TRACKER}_${SHARD}.json"
           python tracker_scanner.py --tracker "$TRACKER" --place-id "$PLACE_ID" \
             --shard "$SHARD" --shards "$SHARDS" --json "$OUT" --verbose "${ARGS[@]}"
@@ -192,9 +187,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: shard-${{ matrix.id }}-${{ matrix.shard }}
-          path: |
-            shard_${{ matrix.id }}_${{ matrix.shard }}.json
-            synced_developer_ids.txt
+          path: shard_${{ matrix.id }}_${{ matrix.shard }}.json
           retention-days: 1
           if-no-files-found: error
 
@@ -281,7 +274,7 @@ jobs:
             --title "$TITLE" --color "$COLOR" --emoji "$EMOJI"
 
       # Only on main: a run on any other branch must never push to main.
-      - name: Persist Discord message id and synced developer IDs
+      - name: Persist Discord message id
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
         continue-on-error: true
         env:
@@ -290,35 +283,21 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          HAS_MSG=0
-          if [ -f "$MSG_FILE" ]; then
-            cp "$MSG_FILE" /tmp/updated_msg_ids.txt
-            HAS_MSG=1
-          fi
-          HAS_DEVS=0
-          if [ "$ID" = "developers" ] && [ -f shards/synced_developer_ids.txt ]; then
-            cp shards/synced_developer_ids.txt /tmp/synced_developer_ids.txt
-            HAS_DEVS=1
-          fi
+          if [ ! -f "$MSG_FILE" ]; then exit 0; fi
+          cp "$MSG_FILE" /tmp/updated_msg_ids.txt
           for attempt in 1 2 3 4 5; do
             git fetch origin main && git checkout -B main origin/main || { sleep $((attempt * 2)); continue; }
-            if [ "$HAS_MSG" = "1" ]; then
-              cp /tmp/updated_msg_ids.txt "$MSG_FILE"
-              git add "$MSG_FILE"
-            fi
-            if [ "$HAS_DEVS" = "1" ]; then
-              python sync_developer_ids.py --ids-file config/developer_ids.txt --extra-from-file /tmp/synced_developer_ids.txt
-              git add config/developer_ids.txt
-            fi
+            cp /tmp/updated_msg_ids.txt "$MSG_FILE"
+            git add "$MSG_FILE"
             if git diff --staged --quiet; then
-              echo "Message id(s) and developer roster unchanged"
+              echo "Message id(s) unchanged"
               exit 0
             fi
-            git commit -m "chore: update $ID message ids & roster [skip ci]"
+            git commit -m "chore: update $ID message ids [skip ci]"
             if git push origin HEAD:main; then exit 0; fi
             sleep $((attempt * 2))
           done
-          echo "::warning::Could not push the updated $ID state; the next run will resync"
+          echo "::warning::Could not push the updated $ID message ids; the next run will resync"
 
   # ---------------------------------------------------------------------------
   # Best-effort follow step. Bounded so a slow run can't pile up behind the next ones.

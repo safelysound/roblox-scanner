@@ -80,7 +80,7 @@ notifiers:
     emoji: "<:roblox:1551329066337050754>"
     webhookSecret: DISCORD_WEBHOOK_DEVELOPER_JOINS
     shards: 2
-    interval: 4
+    interval: 5
 
   admin:
     tracker: admin
