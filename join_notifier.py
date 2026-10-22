@@ -188,6 +188,7 @@ def poll(accounts, ids, poll_no=0, stats=None, cache=None, acct_offset=0):
         # Full all-accounts sweep on poll 0 (seeding) and every 3rd poll (~48s) so Appearing-Offline
         # followers are caught and pinned into viewer_map, while intermediate 16s polls use the targeted
         # wide sweep below (~60% fewer presence calls across concurrent trackers with full 16s latency).
+        answered_by = {}
         start = (poll_no + acct_offset) % len(usable)
         for k in range(len(usable)):
             acct = usable[(start + k) % len(usable)]
@@ -196,9 +197,15 @@ def poll(accounts, ids, poll_no=0, stats=None, cache=None, acct_offset=0):
             if n_ans > 0:
                 ok = True
                 for u in ids:
+                    answered_by.setdefault(u, set()).add(acct)
                     if _rank(best.get(u)) > before_ranks[u] and not _hidden_in_game(best[u]):
                         viewer_map[u] = acct.key
                         unseeable_until.pop(u, None)
+        if cache is not None:
+            min_checked = max(1, len(live) - 2)
+            for u in ids:
+                if _hidden_in_game(best.get(u) or {}) and len(answered_by.get(u, ())) >= min_checked:
+                    unseeable_until[u] = time.time() + HIDDEN_RETRY_TTL
     else:
         # Wide mode: first query known follower/viewer accounts directly for users whose game visibility
         # was already pinned to a specific account, then deal remaining users round-robin across the ring.
@@ -278,8 +285,9 @@ def poll(accounts, ids, poll_no=0, stats=None, cache=None, acct_offset=0):
                             unseeable_until.pop(u, None)
 
         if cache is not None:
+            min_checked = max(1, len(live) - 2)
             for u in hidden:
-                if _hidden_in_game(best.get(u) or {}) and len(answered_by.get(u, ())) >= len(live):
+                if _hidden_in_game(best.get(u) or {}) and len(answered_by.get(u, ())) >= min_checked:
                     unseeable_until[u] = time.time() + HIDDEN_RETRY_TTL
 
     complete = ok and covered_all and len(usable) == len(accounts) and sum(a.errors for a in accounts) == errors_before
