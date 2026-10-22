@@ -3,19 +3,19 @@
 High-speed multi-shard sync for `config/developer_ids.txt` across configured Roblox
 developer communities (`groupSources` in `config/trackers.yaml`).
 
-Why multi-shard user-role + friend-graph resolution is needed:
-- Roblox Communities with restricted member visibility (e.g. `Roblox Presents` 4111519,
-  `Twin Atlas Events` 33163515, `Twin Atlas` 15556721) return HTTP 400/403 on
-  `/v1/groups/{gid}/roles/{roleId}/users` to non-members.
-- Public `/v1/groups/{gid}/roles` always returns exact role definitions & headcounts,
-  and public `/v2/users/{uid}/groups/roles` always returns every community & rank held
-  by any Roblox user (~20+ req/s per runner IP with zero auth required).
-- Combining:
-    1. Existing `config/developer_ids.txt` + community owners
-    2. Official Group of Roblox (`1200769`), Video Stars (`4199740`), and pool followings
-    3. Multi-shard 1-hop + Wave-2 friend-graph expansion (`/v1/users/{uid}/friends`,
-       ~15 req/runner IP -> zero 429s across 8 shards)
-  discovers both internal Roblox staff developers and external studio contractors in < 60s.
+4-stage zero-bottleneck pipeline:
+1. `collect` (1 job, ~5s): Resolves target group role specs (`expectedTotal` per role),
+   checks if any community exposes `/roles/{id}/users` directly, and builds the initial
+   candidate & friend-seed sets from `config/developer_ids.txt`, community owners,
+   cached `final-results-admin` (`1200769`), `final-results-video-stars` (`4199740`),
+   and pool account followings.
+2. `expand` (8 parallel shards, ~5s): Each runner expands `/v1/users/{uid}/friends` for
+   its `1/8` slice of seed developers (~17 req/runner IP -> under the 18 req/min IP window).
+3. `sweep` (12 parallel shards, ~2.5 min): Each runner combines `base_candidates` + all 8
+   `expand` shards and checks `/v2/users/{uid}/groups/roles` ONLY on `uid % 12 == shard`.
+4. `merge` (1 job, ~2s, 0 network calls): Deduplicates all 12 shards, logs exact per-group
+   & per-role discovery coverage, updates `config/developer_ids.txt`, and writes
+   `sync_report.json`.
 """
 
 import argparse
@@ -23,7 +23,6 @@ import io
 import json
 import os
 import random
-import subprocess
 import sys
 import threading
 import time
@@ -39,6 +38,7 @@ from developer_scanner import (
     _get_all_cookies,
     _get_followings,
     _get_my_id,
+    fetch_user_infos,
     load_user_ids,
 )
 
@@ -52,7 +52,6 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
 def load_group_specs(tracker_id: str = "developers") -> Dict[int, dict]:
-    """Return `{group_id: {'minRank': int, 'roles': Optional[Set[str]], 'name': str, 'expected_by_role': ...}}`."""
     cfg_data = yaml.safe_load(Path("config/trackers.yaml").read_text(encoding="utf-8")) or {}
     tcfg = next((t for t in cfg_data.get("trackers", []) if t.get("id") == tracker_id), None)
     if not tcfg:
@@ -98,11 +97,6 @@ def load_group_specs(tracker_id: str = "developers") -> Dict[int, dict]:
 
 
 def try_direct_group_role_fetch(specs: Dict[int, dict], pool: List[Tuple[str, str]]) -> Tuple[List[dict], Set[int]]:
-    """
-    Fast check of `/v1/groups/{gid}/roles/{roleId}/users` using the first available pool cookie.
-    Returns `(members, accessible_group_ids)` without retrying 400/403 across all cookies when a
-    community disables member-list visibility completely.
-    """
     if not specs or not pool:
         return [], set()
     sess = requests.Session()
@@ -166,7 +160,6 @@ def try_direct_group_role_fetch(specs: Dict[int, dict], pool: List[Tuple[str, st
 
 
 def _load_ids_from_recent_artifacts(repo: str, token: str) -> Set[int]:
-    """Pull ~3,450 cached staff & Video Star IDs from recent workflow artifacts in < 1s."""
     found: Set[int] = set()
     if not repo or not token:
         return found
@@ -235,10 +228,6 @@ def _fetch_public_group_fast(group_id: int) -> Set[int]:
 
 
 def expand_friends_paced(seed_ids: List[int]) -> Tuple[Set[int], Dict[int, Tuple[str, str]]]:
-    """
-    Fetch `/v1/users/{uid}/friends` safely within each runner IP's ~18 req/60s window.
-    On 8 parallel runners, ~15 seeds per runner completes in < 1.5s with 0 rate limits.
-    """
     discovered: Set[int] = set()
     names: Dict[int, Tuple[str, str]] = {}
     if not seed_ids:
@@ -289,7 +278,6 @@ def sweep_user_group_roles(
     specs: Dict[int, dict],
     known_names: Optional[Dict[int, Tuple[str, str]]] = None,
 ) -> List[dict]:
-    """Check `/v2/users/{uid}/groups/roles` in parallel threads (~20+ req/s per runner IP)."""
     if not candidate_ids or not specs:
         return []
     known_names = known_names or {}
@@ -377,11 +365,10 @@ def cmd_collect(args: argparse.Namespace) -> int:
     direct_members, accessible = try_direct_group_role_fetch(specs, pool)
     remaining_gids = [gid for gid in specs if gid not in accessible]
 
-    # Seed friend expansion with all known devs + group owners + high-signal creators
     friend_seeds = sorted(
         existing
         | {sp["ownerId"] for sp in specs.values() if sp.get("ownerId")}
-        | {537603049}  # Roblox Innovation Studio owner
+        | {537603049}
     )
 
     base_candidates: Set[int] = set(friend_seeds) | {int(m["userId"]) for m in direct_members}
@@ -395,7 +382,6 @@ def cmd_collect(args: argparse.Namespace) -> int:
                 art_ids.update(_fetch_public_group_fast(pub_gid))
         base_candidates.update(art_ids)
 
-        # Also pull follower IDs already cached on notifier branches or pool accounts
         for _, ck in pool[:4]:
             hdr = {"Cookie": f".ROBLOSECURITY={ck}"}
             mid = _get_my_id(hdr)
@@ -418,7 +404,30 @@ def cmd_collect(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_shard(args: argparse.Namespace) -> int:
+def cmd_expand(args: argparse.Namespace) -> int:
+    payload = json.loads(Path(args.collect_json).read_text(encoding="utf-8"))
+    shard = int(args.shard)
+    shards = int(args.shards)
+    my_seeds = [u for i, u in enumerate(payload["friend_seeds"]) if i % shards == shard]
+    t0 = time.time()
+    friends, friend_names = expand_friends_paced(my_seeds)
+    print(
+        f"[expand {shard}/{shards}] expanded {len(my_seeds)} developer friend lists -> "
+        f"{len(friends)} friends in {time.time() - t0:.1f}s",
+        file=sys.stderr,
+    )
+    Path(args.out).write_text(
+        json.dumps({
+            "shard": shard,
+            "friends": sorted(friends),
+            "friend_names": {str(k): list(v) for k, v in friend_names.items()},
+        }),
+        encoding="utf-8",
+    )
+    return 0
+
+
+def cmd_sweep(args: argparse.Namespace) -> int:
     payload = json.loads(Path(args.collect_json).read_text(encoding="utf-8"))
     specs = {
         int(k): {**v, "roles": set(v["roles"]) if v.get("roles") else None}
@@ -427,41 +436,34 @@ def cmd_shard(args: argparse.Namespace) -> int:
     accessible = set(payload.get("accessible_groups") or [])
     target_specs = {gid: sp for gid, sp in specs.items() if gid not in accessible}
 
+    full_pool: Set[int] = set(payload["base_candidates"])
+    friend_names: Dict[int, Tuple[str, str]] = {}
+    for p in sorted(Path(args.friends_dir).glob("friends_shard_*.json")):
+        fd = json.loads(p.read_text(encoding="utf-8"))
+        full_pool.update(int(x) for x in fd.get("friends") or [])
+        for k, v in (fd.get("friend_names") or {}).items():
+            friend_names[int(k)] = (v[0], v[1])
+
     shard = int(args.shard)
     shards = int(args.shards)
-    my_seeds = [u for i, u in enumerate(payload["friend_seeds"]) if i % shards == shard]
+    local_pool = sorted(uid for uid in full_pool if uid % shards == shard)
 
     t0 = time.time()
-    friends, friend_names = expand_friends_paced(my_seeds)
-    print(
-        f"[shard {shard}/{shards}] expanded {len(my_seeds)} developer friend lists -> "
-        f"{len(friends)} unique friends in {time.time() - t0:.1f}s",
-        file=sys.stderr,
-    )
-
-    # Note: cross-shard friend IDs are written out so merge can do fast deduped closure too,
-    # while each shard immediately checks its own deterministic `uid % shards == shard` slice!
-    local_pool = sorted(
-        uid for uid in (set(payload["base_candidates"]) | friends)
-        if uid % shards == shard
-    )
-    t1 = time.time()
     matches = sweep_user_group_roles(local_pool, target_specs, known_names=friend_names)
     print(
-        f"[shard {shard}/{shards}] checked {len(local_pool)} candidates in {time.time() - t1:.1f}s -> "
-        f"{len(matches)} target Developer+ memberships",
+        f"[sweep {shard}/{shards}] checked {len(local_pool)}/{len(full_pool)} candidates "
+        f"in {time.time() - t0:.1f}s -> {len(matches)} target Developer+ memberships",
         file=sys.stderr,
     )
-
-    out = {
-        "shard": shard,
-        "shards": shards,
-        "checked": local_pool,
-        "friends": sorted(friends),
-        "friend_names": {str(k): list(v) for k, v in friend_names.items()},
-        "matches": matches,
-    }
-    Path(args.out).write_text(json.dumps(out), encoding="utf-8")
+    Path(args.out).write_text(
+        json.dumps({
+            "shard": shard,
+            "shards": shards,
+            "checked_count": len(local_pool),
+            "matches": matches,
+        }),
+        encoding="utf-8",
+    )
     return 0
 
 
@@ -471,65 +473,39 @@ def cmd_merge(args: argparse.Namespace) -> int:
         int(k): {**v, "roles": set(v["roles"]) if v.get("roles") else None}
         for k, v in payload["specs"].items()
     }
-    accessible = set(payload.get("accessible_groups") or [])
-    target_specs = {gid: sp for gid, sp in specs.items() if gid not in accessible}
 
-    checked_all: Set[int] = set()
-    all_friends: Set[int] = set()
-    friend_names: Dict[int, Tuple[str, str]] = {}
+    total_checked = 0
     all_matches: List[dict] = list(payload.get("direct_members") or [])
-
     for p in sorted(Path(args.shards_dir).glob("sync_shard_*.json")):
         sd = json.loads(p.read_text(encoding="utf-8"))
-        checked_all.update(int(x) for x in sd.get("checked") or [])
-        all_friends.update(int(x) for x in sd.get("friends") or [])
-        for k, v in (sd.get("friend_names") or {}).items():
-            friend_names[int(k)] = (v[0], v[1])
+        total_checked += int(sd.get("checked_count") or 0)
         all_matches.extend(sd.get("matches") or [])
 
-    # Cross-shard remainder from Wave-1 friend expansion (friends found on shard A whose uid % N != A)
-    unchecked_wave1 = sorted(all_friends - checked_all)
-    if unchecked_wave1 and target_specs:
-        t0 = time.time()
-        extra_hits = sweep_user_group_roles(unchecked_wave1, target_specs, known_names=friend_names)
-        checked_all.update(unchecked_wave1)
-        all_matches.extend(extra_hits)
-        print(
-            f"[merge] swept {len(unchecked_wave1)} cross-shard 1-hop friends in {time.time() - t0:.1f}s -> "
-            f"+{len(extra_hits)} memberships",
-            file=sys.stderr,
-        )
-
-    # Wave-2 closure: expand friends of newly discovered Developer+ members (capped cleanly so it finishes in < 35s)
-    existing = set(load_user_ids(args.ids_file)) if Path(args.ids_file).exists() else set()
-    wave1_new_devs = sorted({int(m["userId"]) for m in all_matches} - existing)[:36]
-    if wave1_new_devs and target_specs:
-        w2_friends, w2_names = expand_friends_paced(wave1_new_devs)
-        friend_names.update(w2_names)
-        unchecked_w2 = sorted(w2_friends - checked_all)
-        if unchecked_w2:
-            t2 = time.time()
-            w2_hits = sweep_user_group_roles(unchecked_w2, target_specs, known_names=friend_names)
-            checked_all.update(unchecked_w2)
-            all_matches.extend(w2_hits)
-            print(
-                f"[merge] Wave-2 closure swept {len(unchecked_w2)} 2-hop teammates in {time.time() - t2:.1f}s -> "
-                f"+{len(w2_hits)} memberships",
-                file=sys.stderr,
-            )
-
-    # Deduplicate per (groupId, userId) and overall
     by_group_users: Dict[int, Set[int]] = {gid: set() for gid in specs}
     by_group_role: Dict[Tuple[int, str], Set[int]] = {}
     best_member: Dict[int, dict] = {}
+    all_roles_per_user: Dict[int, Set[Tuple[str, int, str, int]]] = {}
     for m in all_matches:
         uid = int(m["userId"])
         gid = int(m["groupId"])
         rname = m.get("role") or "Developer"
         by_group_users.setdefault(gid, set()).add(uid)
         by_group_role.setdefault((gid, rname), set()).add(uid)
+        all_roles_per_user.setdefault(uid, set()).add((specs[gid]["name"], gid, rname, int(m.get("rank") or 255)))
         if uid not in best_member or (not best_member[uid].get("username") and m.get("username")):
             best_member[uid] = m
+
+    missing_names = [u for u, m in best_member.items() if not m.get("username")]
+    if missing_names:
+        try:
+            uinfos = fetch_user_infos(missing_names)
+            for u, inf in uinfos.items():
+                best_member[u]["username"] = inf.get("username")
+                best_member[u]["displayName"] = inf.get("displayName")
+        except Exception:
+            pass
+
+    existing = set(load_user_ids(args.ids_file)) if Path(args.ids_file).exists() else set()
 
     print("\n=== Developer Community Sync Coverage ===")
     for gid, sp in specs.items():
@@ -544,26 +520,26 @@ def cmd_merge(args: argparse.Namespace) -> int:
     merged = existing | synced_ids
     added = sorted(merged - existing)
     print(
-        f"\n[merge] Total checked candidates={len(checked_all)} | "
+        f"\n[merge] Total checked candidates={total_checked} | "
         f"existing={len(existing)} | synced={len(synced_ids)} | "
         f"newly_added={len(added)} | new_total={len(merged)}"
     )
     for uid in added:
         m = best_member[uid]
-        uname = m.get("username") or friend_names.get(uid, (None, None))[0] or "user"
-        print(f"  + {uname} ({uid}) — group {m['groupId']} [{m['role']} rank {m['rank']}]")
+        roles_str = "; ".join(f"{gn}: {rn}" for gn, _, rn, _ in sorted(all_roles_per_user[uid]))
+        print(f"  + {m.get('username') or 'user'} ({uid}) -> {roles_str}")
 
     group_counts = {gid: len(uids) for gid, uids in by_group_users.items()}
     if added and not args.dry_run:
         write_developer_ids_file(Path(args.ids_file), merged, group_counts=group_counts)
         print(f"[merge] updated {args.ids_file} with {len(merged)} sorted IDs (+{len(added)} new)")
     elif not added:
-        print(f"[merge] {args.ids_file} is already up to date ({len(existing)} IDs)")
+        print(f"[merge] {args.ids_file} already contains all {len(merged)} IDs")
 
     if args.report_json:
         Path(args.report_json).write_text(
             json.dumps({
-                "checked_candidates": len(checked_all),
+                "checked_candidates": total_checked,
                 "existing_count": len(existing),
                 "synced_count": len(synced_ids),
                 "added_count": len(added),
@@ -571,10 +547,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 "added": [
                     {
                         "userId": uid,
-                        "username": best_member[uid].get("username") or friend_names.get(uid, (None, None))[0],
-                        "groupId": best_member[uid]["groupId"],
-                        "role": best_member[uid]["role"],
-                        "rank": best_member[uid]["rank"],
+                        "username": best_member[uid].get("username"),
+                        "displayName": best_member[uid].get("displayName"),
+                        "roles": [f"{gn}: {rn}" for gn, _, rn, _ in sorted(all_roles_per_user[uid])],
                     }
                     for uid in added
                 ],
@@ -628,11 +603,18 @@ def main() -> int:
     p_col.add_argument("--ids-file", default="config/developer_ids.txt")
     p_col.add_argument("--out", required=True)
 
-    p_sh = sub.add_parser("shard")
-    p_sh.add_argument("--collect-json", required=True)
-    p_sh.add_argument("--shard", type=int, required=True)
-    p_sh.add_argument("--shards", type=int, required=True)
-    p_sh.add_argument("--out", required=True)
+    p_exp = sub.add_parser("expand")
+    p_exp.add_argument("--collect-json", required=True)
+    p_exp.add_argument("--shard", type=int, required=True)
+    p_exp.add_argument("--shards", type=int, required=True)
+    p_exp.add_argument("--out", required=True)
+
+    p_sw = sub.add_parser("sweep")
+    p_sw.add_argument("--collect-json", required=True)
+    p_sw.add_argument("--friends-dir", required=True)
+    p_sw.add_argument("--shard", type=int, required=True)
+    p_sw.add_argument("--shards", type=int, required=True)
+    p_sw.add_argument("--out", required=True)
 
     p_mg = sub.add_parser("merge")
     p_mg.add_argument("--collect-json", required=True)
@@ -648,8 +630,10 @@ def main() -> int:
     args = ap.parse_args()
     if args.cmd == "collect":
         return cmd_collect(args)
-    if args.cmd == "shard":
-        return cmd_shard(args)
+    if args.cmd == "expand":
+        return cmd_expand(args)
+    if args.cmd == "sweep":
+        return cmd_sweep(args)
     if args.cmd == "union":
         return cmd_union(args)
     return cmd_merge(args)

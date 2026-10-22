@@ -2,8 +2,9 @@ name: Sync Developer IDs
 
 # Periodically discovers new Developer+ members across configured Roblox communities
 # (`groupSources` in config/trackers.yaml: Roblox Presents 4111519, Twin Atlas Events 33163515,
-# Twin Atlas 15556721) across 8 parallel runner IPs and commits any additions to
-# config/developer_ids.txt — automatically triggering Trackers to scan, update embeds, and follow.
+# Twin Atlas 15556721) across parallel runner IPs (`collect -> expand[0..7] -> sweep[0..11] -> merge`)
+# and commits any additions to config/developer_ids.txt — automatically triggering Trackers to scan,
+# update standing embeds, and auto-follow hidden in-game developers.
 
 on:
   schedule:
@@ -46,10 +47,10 @@ jobs:
           path: collect.json
           retention-days: 1
 
-  sweep:
+  expand:
     needs: collect
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
@@ -65,12 +66,52 @@ jobs:
           name: sync-collect
           path: .
 
-      - name: Sweep shard ${{ matrix.shard }}/8
+      - name: Expand friend graph shard ${{ matrix.shard }}/8
         run: |
-          python3 sync_developer_ids.py shard \
+          python3 sync_developer_ids.py expand \
             --collect-json collect.json \
             --shard "${{ matrix.shard }}" \
             --shards 8 \
+            --out "friends_shard_${{ matrix.shard }}.json"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sync-friends-${{ matrix.shard }}
+          path: friends_shard_${{ matrix.shard }}.json
+          retention-days: 1
+
+  sweep:
+    needs: [collect, expand]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Ensure Python dependencies
+        run: python3 -c "import requests, yaml" 2>/dev/null || pip3 install --quiet --break-system-packages -r requirements.txt
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: sync-collect
+          path: .
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: sync-friends-*
+          merge-multiple: true
+          path: friends_shards
+
+      - name: Sweep candidate slice ${{ matrix.shard }}/12
+        run: |
+          python3 sync_developer_ids.py sweep \
+            --collect-json collect.json \
+            --friends-dir friends_shards \
+            --shard "${{ matrix.shard }}" \
+            --shards 12 \
             --out "sync_shard_${{ matrix.shard }}.json"
 
       - uses: actions/upload-artifact@v7
@@ -82,7 +123,7 @@ jobs:
   merge:
     needs: [collect, sweep]
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
@@ -102,7 +143,7 @@ jobs:
           merge-multiple: true
           path: sync_shards
 
-      - name: Merge shards, run Wave-2 closure & update config/developer_ids.txt
+      - name: Merge shards & update config/developer_ids.txt
         run: |
           git fetch origin main && git checkout -B main origin/main
           python3 sync_developer_ids.py merge \
