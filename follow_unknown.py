@@ -100,12 +100,12 @@ def load_unknowns(json_path, tracker=None):
     other=data.get("other_game_players",[])
     meta=data.get("meta") or {}
     any_game=bool(meta.get("anyGame", False))
-    target_place=str(meta.get("targetPlaceId") or "74205509034203")
+    target_place=str(meta.get("targetPlaceId") or "116463962153167")
     raw_univ=meta.get("targetUniverseId")
     try:
-        target_universe=int(raw_univ) if raw_univ is not None else (10766456501 if target_place=="74205509034203" else None)
+        target_universe=int(raw_univ) if raw_univ is not None else (10770728771 if target_place=="116463962153167" else None)
     except (TypeError, ValueError):
-        target_universe=10766456501 if target_place=="74205509034203" else None
+        target_universe=10770728771 if target_place=="116463962153167" else None
 
     filtered=[]
     for u in target+other:

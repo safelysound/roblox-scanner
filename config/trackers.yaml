@@ -33,7 +33,6 @@ trackers:
     resultsFile: roblox_scan_results.json
     messageIdFile: .github/discord_message_id.txt
     scanEvery: 15  # was every tick; this is by far the biggest single presence-load contributor (~2800 members)
-    anyGame: true  # TESTING between events -- see field docs above
 
   - id: video-stars
     name: Video Star Tracker
@@ -46,7 +45,6 @@ trackers:
     resultsFile: roblox_scan_results_video.json
     messageIdFile: .github/discord_message_id_video_stars.txt
     scanEvery: 15
-    anyGame: true  # TESTING between events -- see field docs above
 
   - id: developers
     name: Developer Tracker
@@ -58,8 +56,8 @@ trackers:
     resultsFile: roblox_scan_results_developers.json
     messageIdFile: .github/discord_message_id_developers.txt
 
-# Real-time "joined The Hunt" notifiers (join_notifier.py). One per tracker; the key is the tracker id.
-#   title          embed title
+# Real-time join notifiers (join_notifier.py). One per tracker; the key is the tracker id.
+#   title          embed title ({game} resolves to target game name or current game in anyGame mode)
 #   color          embed color (hex)
 #   roleId         role to ping (omit for no ping)
 #   emoji          emoji before the name
@@ -69,7 +67,7 @@ trackers:
 notifiers:
   developers:
     tracker: developers
-    title: "A Developer has joined The Hunt: Roblox 20!"
+    title: "A Developer has joined {game}!"
     color: "#000000"
     roleId: "1552512715443146805"
     emoji: "<:roblox:1551329066337050754>"
@@ -78,7 +76,7 @@ notifiers:
 
   admin:
     tracker: admin
-    title: "An Admin has joined {game}!"  # {game} substituted per-join while anyGame: true above
+    title: "An Admin has joined {game}!"
     color: "#E74C3C"
     roleId: "1552548764021956748"
     emoji: "<:roblox:1551329066337050754>"
@@ -87,7 +85,7 @@ notifiers:
 
   video-stars:
     tracker: video-stars
-    title: "A Video Star has joined {game}!"  # {game} substituted per-join while anyGame: true above
+    title: "A Video Star has joined {game}!"
     color: "#F1C40F"
     roleId: "1552548815268221009"
     emoji: "<:verified:1551329029783691334>"
@@ -95,10 +93,10 @@ notifiers:
     interval: 25
 
 settings:
-  targetPlaceId: 74205509034203
-  targetUniverseId: 10766456501
+  targetPlaceId: 116463962153167
+  targetUniverseId: 10770728771
   # Set to true between events to stop all automatic activity (scan, notify, follow) with zero code
   # changes -- flip back to false when the next event starts. Only affects the automatic cron dispatch
   # (tracker: all/unset); a manual dispatch for one specific tracker always runs, so testing and prep
   # work between events is unaffected.
-  paused: true
+  paused: false

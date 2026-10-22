@@ -97,9 +97,9 @@ jobs:
           fi
           # scanEvery throttles the scan -> merge -> follow pipeline (redundant with the notifier,
           # which already polls presence for the same people); notify always runs every tick regardless.
-          # Only applies to the normal "all trackers" cadence -- a manual dispatch for one specific
-          # tracker (testing) always scans, regardless of the clock.
-          if [ -n "$SELECTED" ] && [ "$SELECTED" != "all" ]; then
+          # Only applies to the normal "all trackers" cron cadence -- a push (config/roster change) or
+          # manual dispatch for one specific tracker always scans immediately regardless of the clock.
+          if [ "$GITHUB_EVENT_NAME" = "push" ] || { [ -n "$SELECTED" ] && [ "$SELECTED" != "all" ]; }; then
             SCAN_TRACKERS="$TRACKERS"
           else
             MINUTE=$(date -u +%-M)

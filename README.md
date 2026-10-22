@@ -1,6 +1,6 @@
-# Roblox Tracker — `Official Group` / `Video Stars` / `Developers` → `The Hunt`
+# Roblox Tracker — `Official Group` / `Video Stars` / `Developers` → `The Hollow`
 
-One config, one scanner, three trackers. Detects who is playing [The Hunt: Roblox 20 (74205509034203)](https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20) and keeps one Discord embed per tracker up to date, editing the same message every ~5 minutes. Runs entirely on GitHub Actions (free for public repos).
+One config, one scanner, three trackers. Detects who is playing [The Hollow (116463962153167)](https://www.roblox.com/games/116463962153167/The-Hollow) and keeps one Discord embed per tracker up to date, editing the same message every ~5 minutes. Runs entirely on GitHub Actions (free for public repos).
 
 ## Quick start (local)
 

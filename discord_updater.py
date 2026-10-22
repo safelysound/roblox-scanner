@@ -37,9 +37,10 @@ from join_notifier import JOIN_REDIRECT_BASE, md_escape
 
 ROBLOX_EMOJI = "<:roblox:1551329066337050754>"
 DEFAULT_COLOR = 3168504  # Admin Tracker #305778
-TARGET_GAME_URL = "https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20"
-TARGET_PLACE_ID = "74205509034203"
-TARGET_UNIVERSE_ID = 10766456501
+TARGET_GAME_URL = "https://www.roblox.com/games/116463962153167/The-Hollow"
+TARGET_PLACE_ID = "116463962153167"
+TARGET_UNIVERSE_ID = 10770728771
+TARGET_GAME_NAME = "The Hollow"
 MAX_DESC = 4000
 
 def parse_color(val):
@@ -69,10 +70,10 @@ def get_game_link(place_id, universe_id, last_location: str, target_place_id: st
         url = f"https://www.roblox.com/games/{place_id}/{safe_name}"
         if str(place_id) == TARGET_PLACE_ID:
             url = TARGET_GAME_URL
-            raw_name = "The Hunt: Roblox 20"
+            raw_name = (target_game_name or "").strip() or TARGET_GAME_NAME
         return raw_name, url
     if target_place_id:
-        raw_name = (last_location or "").strip() or (target_game_name or "").strip() or ("The Hunt: Roblox 20" if str(target_place_id) == TARGET_PLACE_ID else "Game")
+        raw_name = (last_location or "").strip() or (target_game_name or "").strip() or (TARGET_GAME_NAME if str(target_place_id) == TARGET_PLACE_ID else "Game")
         url = TARGET_GAME_URL if str(target_place_id) == TARGET_PLACE_ID else f"https://www.roblox.com/games/{target_place_id}/Game"
         return raw_name, url
     return None, None

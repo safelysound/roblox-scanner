@@ -37,6 +37,7 @@ from developer_scanner import (
     DEFAULT_UNIVERSE_ID,
     PRESENCE_API,
     PRESENCE_BATCH_SIZE,
+    DEFAULT_GAME_NAME,
     _get_all_cookies,
     fetch_user_infos,
     load_user_ids,
@@ -46,7 +47,7 @@ from developer_scanner import (
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 PENDING_MAX_AGE = 600     # give up on an unsent alert after 10 minutes
 STATE_MAX_STALE = 900     # older than this the state is ignored (notifier was down) -> reseed silently
-WIDE_PAUSE = 0.62         # ~1.6 requests/s per job so concurrent trackers stay under Roblox's per-account window
+WIDE_PAUSE = 0.72         # ~1.4 requests/s per job so 3 concurrent trackers stay well under Roblox's per-account window
 HIDDEN_RETRY_TTL = 150    # if all pool accounts confirmed placeId is hidden, re-probe across all accounts every 150s
 PAUSE_MAX_WAIT = 8        # if every account is paused by a short 429, wait up to this long instead of failing the poll
 SEED_MAX_WAIT = 180       # keep recording silently until one complete poll, but at most this long
@@ -183,11 +184,21 @@ def poll(accounts, ids, poll_no=0, stats=None, cache=None, acct_offset=0):
     viewer_map = cache.setdefault("viewer", {}) if cache is not None else {}
     unseeable_until = cache.setdefault("unseeable_until", {}) if cache is not None else {}
 
-    if len(ids) <= WIDE_THRESHOLD:
+    if len(ids) <= WIDE_THRESHOLD and poll_no % 3 == 0:
+        # Full all-accounts sweep on poll 0 (seeding) and every 3rd poll (~48s) so Appearing-Offline
+        # followers are caught and pinned into viewer_map, while intermediate 16s polls use the targeted
+        # wide sweep below (~60% fewer presence calls across concurrent trackers with full 16s latency).
         start = (poll_no + acct_offset) % len(usable)
         for k in range(len(usable)):
             acct = usable[(start + k) % len(usable)]
-            ok = _sweep(acct, ids, best) > 0 or ok
+            before_ranks = {u: _rank(best.get(u)) for u in ids}
+            n_ans = _sweep(acct, ids, best, pause=WIDE_PAUSE if k else 0.0)
+            if n_ans > 0:
+                ok = True
+                for u in ids:
+                    if _rank(best.get(u)) > before_ranks[u] and not _hidden_in_game(best[u]):
+                        viewer_map[u] = acct.key
+                        unseeable_until.pop(u, None)
     else:
         # Wide mode: first query known follower/viewer accounts directly for users whose game visibility
         # was already pinned to a specific account, then deal remaining users round-robin across the ring.
@@ -292,11 +303,11 @@ LOAD_INFO = {"result": "not loaded", "age": None}   # what load_state found, for
 
 
 def fresh_state():
-    return {"hunt": {}, "pending": {}, "last_job": {}, "last_place": {}, "updated": 0, "members": [], "members_ts": 0}
+    return {"hunt": {}, "pending": {}, "last_job": {}, "last_place": {}, "target": None, "updated": 0, "members": [], "members_ts": 0}
 
 
-def load_state(path):
-    """-> (state, seeded). seeded=False means: record who is in The Hunt now without announcing anyone."""
+def load_state(path, target_sig=None, target_ids=None):
+    """-> (state, seeded). seeded=False means: record who is in target game now without announcing anyone."""
     try:
         st = json.loads(Path(path).read_text(encoding="utf-8"))
         st["hunt"] = {int(k): float(v) for k, v in st.get("hunt", {}).items()}
@@ -307,17 +318,32 @@ def load_state(path):
         st.setdefault("members_ts", 0)
     except (OSError, ValueError):
         LOAD_INFO.update(result="none (fresh start)", age=None)
-        return fresh_state(), False
+        st = fresh_state()
+        st["target"] = target_sig
+        return st, False
     age = time.time() - st.get("updated", 0)
     if age > STATE_MAX_STALE:
         log("state is stale, reseeding without announcements")
         LOAD_INFO.update(result="STALE (reseeded silently)", age=age)
-        return fresh_state(), False
+        fresh = fresh_state()
+        fresh["members"] = st.get("members", [])
+        fresh["members_ts"] = st.get("members_ts", 0)
+        fresh["target"] = target_sig
+        return fresh, False
     LOAD_INFO.update(result="loaded", age=age)
-    # Trusted state: everyone recorded as in The Hunt is assumed to still be there. Without this, a gap
-    # between runs longer than the grace window would make all of them look like fresh joins.
     now = time.time()
-    st["hunt"] = {uid: now for uid in st["hunt"]}
+    prev_target = st.get("target")
+    if target_sig and prev_target != target_sig:
+        keep = {uid for uid in st["hunt"] if not target_ids or st["last_place"].get(uid) in target_ids}
+        st["hunt"] = {uid: now for uid in keep}
+        st["pending"] = {uid: t for uid, t in st["pending"].items() if uid in keep}
+        st["last_job"] = {uid: j for uid, j in st["last_job"].items() if uid in keep}
+        st["last_place"] = {uid: p for uid, p in st["last_place"].items() if uid in keep}
+        st["target"] = target_sig
+        log(f"target changed ({prev_target} -> {target_sig}): retained {len(keep)} matching session(s)")
+    else:
+        # Trusted state: everyone recorded in target game is assumed to still be there across run gaps.
+        st["hunt"] = {uid: now for uid in st["hunt"]}
     return st, True
 
 
@@ -433,11 +459,10 @@ def build_payload(uid, name, p, cfg, joined_at, thumb=None, test=False, game_nam
     profile = f"https://www.roblox.com/users/{uid}/profile"
     job = (p or {}).get("gameId")
     server = f"`{job}`" if job else "`server not visible`"
-    game_label = game_name or "The Hunt"
+    game_label = game_name or DEFAULT_GAME_NAME
     desc = (f"- {cfg['emoji']} [{display} ({username})]({profile}) has joined **{game_label}**!\n"
             f"<t:{int(joined_at)}:R>\u30fb{server}")
-    # cfg['title'] may contain a {game} placeholder (any_game-mode notifiers); .format() is a safe no-op
-    # for titles that don't reference it (e.g. Developers, which is always Hunt-specific).
+    # cfg['title'] may contain a {game} placeholder; .format() is a safe no-op for static titles.
     title_text = cfg["title"].format(game=game_label)
     embed = {"title": ("[TEST] " if test else "") + title_text, "description": desc}
     if cfg.get("color") is not None:
@@ -611,6 +636,12 @@ def main():
     place_id = int(settings.get("targetPlaceId", DEFAULT_PLACE_ID))
     universe_id = int(settings.get("targetUniverseId", DEFAULT_UNIVERSE_ID))
     any_game = bool(tracker.get("anyGame", False))
+    target_game_name = DEFAULT_GAME_NAME
+    if not any_game:
+        try:
+            target_game_name = resolve_game_name(universe_id) or DEFAULT_GAME_NAME
+        except Exception:
+            target_game_name = DEFAULT_GAME_NAME
 
     if args.test:
         uid = (load_user_ids(tracker["idsFile"]) if tracker.get("idsFile") else [1])[0]
@@ -620,7 +651,7 @@ def main():
             name = {}
         sample = {"userPresenceType": 2, "placeId": place_id, "rootPlaceId": place_id,
                   "gameId": "00000000-0000-0000-0000-000000000000"}
-        sample_game = "a Test Game" if any_game else None
+        sample_game = "a Test Game" if any_game else target_game_name
         thumb = avatar_url(uid) if cfg["thumbnail"] == "avatar" else None
         ok, button = post_webhook(webhook, build_payload(uid, name, sample, cfg, time.time(), thumb, test=True, game_name=sample_game), args.dry_run)
         print(f"::notice title=notifier {args.notifier} test::sent={ok} button_accepted={button} thumbnail={'yes' if thumb else 'no'}")
@@ -632,21 +663,23 @@ def main():
         return 1
     accounts = [Account(k, c) for k, c in pool]
 
-    st, seeded = load_state(state_path)
+    target_sig = "any" if any_game else f"{place_id}:{universe_id}"
+    target_ids = None if any_game else {place_id, universe_id}
+    st, seeded = load_state(state_path, target_sig=target_sig, target_ids=target_ids)
     ids = resolve_ids(tracker, st)
     if not ids:
         log("no users to watch")
         return 1
-    mode = "wide" if len(ids) > WIDE_THRESHOLD else "all-accounts"
+    mode = "wide" if len(ids) > WIDE_THRESHOLD else "smart-all"
     log(f"[{args.notifier}] watching {len(ids)} users, {len(accounts)} accounts, {mode} sweeps, every {interval}s for "
-        f"{'ever' if not args.duration else str(args.duration) + 's'}")
+        f"{'ever' if not args.duration else str(args.duration) + 's'} (target={'anyGame' if any_game else f'{target_game_name} [{place_id}]'})")
 
     names = {}
     game_name_cache = {}  # universeId -> resolved name, any_game mode only
 
     def _game_name_for(p):
         if not any_game:
-            return None
+            return target_game_name
         u = p.get("universeId")
         if u:
             if u not in game_name_cache:
@@ -663,7 +696,7 @@ def main():
     sweep_secs = []
     pstats = Counter()
     poll_cache = {}
-    ring_slots = {"admin": 0, "video-stars": max(1, len(accounts) // 2), "developers": max(1, len(accounts) // 4)}
+    ring_slots = {"admin": 0, "video-stars": max(1, len(accounts) // 3), "developers": max(2, (2 * len(accounts)) // 3)}
     acct_offset = ring_slots.get(args.notifier, sum(ord(ch) for ch in args.notifier) % max(1, len(accounts)))
     while True:
         t0 = time.time()
@@ -677,7 +710,7 @@ def main():
             if not seeded and (complete or t0 - start >= SEED_MAX_WAIT):
                 # Only trust the baseline once every account answered; otherwise people visible through a
                 # failed account would look like fresh joins when it recovers.
-                what = "in-game (any game)" if any_game else "already in The Hunt"
+                what = "in-game (any game)" if any_game else f"already in {target_game_name}"
                 log(f"seeded: {len(in_hunt)} {what}, not announcing" + ("" if complete else " (incomplete after waiting)"))
                 seeded = True
             for uid in ready:
@@ -689,7 +722,7 @@ def main():
                 joined_at = st["pending"].get(uid, t0)
                 thumb = avatar_url(uid) if cfg["thumbnail"] == "avatar" else None
                 game_name = _game_name_for(in_hunt[uid])
-                log(f"announcing {uid} ({game_name or 'The Hunt'}, server id {'yes' if in_hunt[uid].get('gameId') else 'no'})")
+                log(f"announcing {uid} ({game_name or target_game_name}, server id {'yes' if in_hunt[uid].get('gameId') else 'no'})")
                 sent_ok, _ = post_webhook(webhook, build_payload(uid, names.get(uid, {}), in_hunt[uid], cfg, joined_at, thumb, game_name=game_name), args.dry_run)
                 if sent_ok:
                     st["pending"].pop(uid, None)
@@ -710,7 +743,7 @@ def main():
     n429 = sum(len(a.limited) for a in accounts)
     waits = sorted(w for a in accounts for w in a.limited)
     print(f"::notice title=notifier {args.notifier}::{good_polls}/{polls} polls ok, {sent} announcement(s), "
-          f"{len(st['hunt'])} {'in-game (any game)' if any_game else 'in The Hunt'}, {len(ids)} watched, avg hidden {pstats['hidden'] / max(1, polls):.0f}, avg sweep {sum(sweep_secs)/len(sweep_secs):.0f}s, "
+          f"{len(st['hunt'])} {'in-game (any game)' if any_game else f'in {target_game_name}'}, {len(ids)} watched, avg hidden {pstats['hidden'] / max(1, polls):.0f}, avg sweep {sum(sweep_secs)/len(sweep_secs):.0f}s, "
           f"state at start: {state_note} | "
           f"rate-limited accounts {limited}, disabled accounts {dead} of {len(accounts)} in pool | presence requests {total_req} in {time.time()-start:.0f}s, "
           f"429s {n429}, retry-after {waits[0] if waits else '-'}..{waits[-1] if waits else '-'}s")

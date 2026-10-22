@@ -19,6 +19,7 @@ import yaml
 # Helpers shared with developer_scanner. Imported directly on purpose: if this import
 # breaks we want the run to fail loudly, not silently produce empty presence data.
 from developer_scanner import (
+    DEFAULT_GAME_NAME,
     _get_all_cookies,
     _log_cookie_status,
     _get_my_id,
@@ -35,8 +36,8 @@ from developer_scanner import (
     resolve_game_name,
 )
 
-DEFAULT_PLACE_ID = 74205509034203
-DEFAULT_UNIVERSE_ID = 10766456501
+DEFAULT_PLACE_ID = 116463962153167
+DEFAULT_UNIVERSE_ID = 10770728771
 GROUP_API = "https://groups.roblox.com/v1/groups/{group_id}/users"
 GROUP_PAGE_LIMIT = 100
 
@@ -370,14 +371,19 @@ def tracker_main_logic():
                     is_following=True
                     print(f"per-user isFollowing true for {uid}", file=sys.stderr)
             except: pass
-        if not any_game and ptype==2 and place_id_p is None and root_place is None and univ is None:
-            # Profile-scrape fallback (profile page sometimes reveals target game even when presence hides it).
-            if _profile_shows_hunt(uid, headers_for_follow, target_place_id=place_id, target_universe_id=universe):
+        if not any_game and ptype==2 and place_id_p is None and root_place is None and univ is None and is_following:
+            # Profile-scrape fallback for followed hidden users (unfollowed users have hidden profile game too).
+            follower_ck = ""
+            for k_ck, raw_ck in pool:
+                if uid in account_followings.get(k_ck, ()):
+                    follower_ck = f".ROBLOSECURITY={raw_ck}"
+                    break
+            if _profile_shows_hunt(uid, headers_for_follow, target_place_id=place_id, target_universe_id=universe, prefer_cookie=follower_ck):
                 print(f"profile scrape: {uid} shows target game via profile", file=sys.stderr)
                 place_id_p=place_id
                 root_place=place_id
                 univ=universe or DEFAULT_UNIVERSE_ID
-                last_loc=game_name or ("The Hunt: Roblox 20" if int(place_id)==DEFAULT_PLACE_ID else "")
+                last_loc=game_name or (DEFAULT_GAME_NAME if int(place_id)==DEFAULT_PLACE_ID else "")
                 is_following=True
                 is_target=True
                 is_in_game=True
