@@ -46,7 +46,8 @@ from developer_scanner import (
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 PENDING_MAX_AGE = 600     # give up on an unsent alert after 10 minutes
 STATE_MAX_STALE = 900     # older than this the state is ignored (notifier was down) -> reseed silently
-WIDE_PAUSE = 0.5          # ~2 requests/s overall: Roblox 429s (retry-after 5s) at ~8/s even when spread over accounts
+WIDE_PAUSE = 0.62         # ~1.6 requests/s per job so concurrent trackers stay under Roblox's per-account window
+HIDDEN_RETRY_TTL = 150    # if all pool accounts confirmed placeId is hidden, re-probe across all accounts every 150s
 PAUSE_MAX_WAIT = 8        # if every account is paused by a short 429, wait up to this long instead of failing the poll
 SEED_MAX_WAIT = 180       # keep recording silently until one complete poll, but at most this long
 MEMBERS_TTL = 3600        # refresh a group's member list at most hourly
@@ -164,7 +165,7 @@ def _hidden_in_game(p):
     return p.get("userPresenceType") == 2 and not (p.get("placeId") or p.get("rootPlaceId") or p.get("universeId"))
 
 
-def poll(accounts, ids, poll_no=0, stats=None):
+def poll(accounts, ids, poll_no=0, stats=None, cache=None, acct_offset=0):
     """One presence sweep. -> (best record per user, any_success, complete).
 
     complete = every account answered every request it was asked, so the picture is not missing anyone
@@ -179,17 +180,42 @@ def poll(accounts, ids, poll_no=0, stats=None):
         return best, ok, False
     live = [a for a in accounts if not a.dead]
     covered_all = True
+    viewer_map = cache.setdefault("viewer", {}) if cache is not None else {}
+    unseeable_until = cache.setdefault("unseeable_until", {}) if cache is not None else {}
+
     if len(ids) <= WIDE_THRESHOLD:
-        for acct in usable:
+        start = (poll_no + acct_offset) % len(usable)
+        for k in range(len(usable)):
+            acct = usable[(start + k) % len(usable)]
             ok = _sweep(acct, ids, best) > 0 or ok
     else:
-        # Wide mode: batches are dealt round-robin across the accounts (rotating the starting account each
-        # poll), so no single account makes a burst of requests. A batch an account can't answer (rate
-        # limit) goes to the next account; if all are paused, wait out the short pause and retry. Then users
-        # who are in-game with a hidden location are re-checked through the other accounts.
-        batches = [ids[i:i + PRESENCE_BATCH_SIZE] for i in range(0, len(ids), PRESENCE_BATCH_SIZE)]
-        start = poll_no % len(live)
+        # Wide mode: first query known follower/viewer accounts directly for users whose game visibility
+        # was already pinned to a specific account, then deal remaining users round-robin across the ring.
+        by_key = {a.key: a for a in live}
+        pinned_buckets = {}
+        remaining_ids = []
+        for u in ids:
+            vk = viewer_map.get(u)
+            va = by_key.get(vk) if vk else None
+            if va and not va.dead and time.time() >= va.blocked_until:
+                pinned_buckets.setdefault(vk, []).append(u)
+            else:
+                remaining_ids.append(u)
+
         answered_by = {}
+        for vk, uids in pinned_buckets.items():
+            va = by_key[vk]
+            for i in range(0, len(uids), PRESENCE_BATCH_SIZE):
+                sub = uids[i:i + PRESENCE_BATCH_SIZE]
+                if _sweep(va, sub, best, pause=WIDE_PAUSE):
+                    ok = True
+                    for u in sub:
+                        answered_by.setdefault(u, set()).add(va)
+                else:
+                    remaining_ids.extend(sub)
+
+        batches = [remaining_ids[i:i + PRESENCE_BATCH_SIZE] for i in range(0, len(remaining_ids), PRESENCE_BATCH_SIZE)]
+        start = (poll_no + acct_offset) % len(live)
         waits = 0
         for j, batch in enumerate(batches):
             while True:
@@ -201,7 +227,7 @@ def poll(accounts, ids, poll_no=0, stats=None):
                     if _sweep(acct, batch, best, pause=WIDE_PAUSE):
                         ok = done = True
                         for u in batch:
-                            answered_by[u] = acct
+                            answered_by.setdefault(u, set()).add(acct)
                         break
                 if done:
                     break
@@ -210,21 +236,41 @@ def poll(accounts, ids, poll_no=0, stats=None):
                     continue
                 covered_all = False
                 break
-        hidden = [u for u, p in best.items() if _hidden_in_game(p)]
+
+        now_ts = time.time()
+        all_hidden = [u for u, p in best.items() if _hidden_in_game(p)]
         if stats is not None:
-            stats["hidden"] += len(hidden)
-        # Re-check the hidden ones through every other account, INTERLEAVED: one chunk at a time, each chunk
-        # walking the accounts in rotation. (Sending an account its whole list back-to-back made bursts of
-        # requests to a single account, which Roblox rate-limited.)
+            stats["hidden"] += len(all_hidden)
+        hidden = [u for u in all_hidden if now_ts >= unseeable_until.get(u, 0.0)]
+
+        # Re-check hidden users across remaining accounts, stopping per user as soon as server gameId is found
+        # and caching the account that revealed them (or cooling down if zero accounts in the pool can see them).
         for c, i in enumerate(range(0, len(hidden), PRESENCE_BATCH_SIZE)):
             chunk = hidden[i:i + PRESENCE_BATCH_SIZE]
             for k in range(len(live)):
                 acct = live[(start + c + k) % len(live)]
                 if acct.dead or time.time() < acct.blocked_until:
                     continue
-                todo = [u for u in chunk if answered_by.get(u) is not acct]
-                if todo:
-                    _sweep(acct, todo, best, pause=WIDE_PAUSE)
+                todo = [
+                    u for u in chunk
+                    if acct not in answered_by.get(u, ())
+                    and not (best.get(u) or {}).get("gameId")
+                ]
+                if not todo:
+                    continue
+                before_ranks = {u: _rank(best.get(u)) for u in todo}
+                if _sweep(acct, todo, best, pause=WIDE_PAUSE) == len(todo):
+                    for u in todo:
+                        answered_by.setdefault(u, set()).add(acct)
+                        if _rank(best.get(u)) > before_ranks[u] and not _hidden_in_game(best[u]):
+                            viewer_map[u] = acct.key
+                            unseeable_until.pop(u, None)
+
+        if cache is not None:
+            for u in hidden:
+                if _hidden_in_game(best.get(u) or {}) and len(answered_by.get(u, ())) >= len(live):
+                    unseeable_until[u] = time.time() + HIDDEN_RETRY_TTL
+
     complete = ok and covered_all and len(usable) == len(accounts) and sum(a.errors for a in accounts) == errors_before
     return best, ok, complete
 
@@ -246,7 +292,7 @@ LOAD_INFO = {"result": "not loaded", "age": None}   # what load_state found, for
 
 
 def fresh_state():
-    return {"hunt": {}, "pending": {}, "last_job": {}, "updated": 0, "members": [], "members_ts": 0}
+    return {"hunt": {}, "pending": {}, "last_job": {}, "last_place": {}, "updated": 0, "members": [], "members_ts": 0}
 
 
 def load_state(path):
@@ -256,6 +302,7 @@ def load_state(path):
         st["hunt"] = {int(k): float(v) for k, v in st.get("hunt", {}).items()}
         st["pending"] = {int(k): float(v) for k, v in st.get("pending", {}).items()}
         st["last_job"] = {int(k): v for k, v in st.get("last_job", {}).items()}
+        st["last_place"] = {int(k): v for k, v in st.get("last_place", {}).items()}
         st.setdefault("members", [])
         st.setdefault("members_ts", 0)
     except (OSError, ValueError):
@@ -283,47 +330,55 @@ def save_state(path, st):
 
 
 def detect(st, in_hunt, now, seeded, grace, wait_for_job):
-    """Update state from the users currently in The Hunt; return uids ready to announce.
-
-    The server id (gameId) is globally unique per Roblox server instance, so it is the ground truth for
-    "is this the same session": if we see the SAME job id again, that is proof it's a continuing session,
-    no matter how long the gap since we last confirmed it -- someone only visible through one account that
-    keeps getting rate-limited might be glimpsed just once every several ticks, but every glimpse shows the
-    same server, and that must never re-announce (confirmed in production: one person was re-announced ~50
-    times over 5 hours on the exact same server id, purely from intermittent visibility, not real absence).
-
-    A DIFFERENT job id -- whether they were ever truly absent or not -- means a real, fresh event: either a
-    genuine first join, a real return after leaving, or a hop to a different server while never going fully
-    unseen. An announcement waits up to `wait_for_job` seconds for the server id to show up in presence.
-    """
+    """Update state from the users currently in The Hunt; return uids ready to announce."""
     ready = []
     st.setdefault("last_job", {})
+    st.setdefault("last_place", {})
     for uid, p in in_hunt.items():
         last = st["hunt"].get(uid)
         job = p.get("gameId")
+        place = p.get("universeId") or p.get("rootPlaceId") or p.get("placeId")
         prev_job = st["last_job"].get(uid)
+        prev_place = st["last_place"].get(uid)
         st["hunt"][uid] = now
         if not seeded:
             if job:
                 st["last_job"][uid] = job
+            if place:
+                st["last_place"][uid] = place
             continue
-        if job and prev_job and job == prev_job:
+        same_place = (not place or not prev_place or place == prev_place)
+        if job and prev_job and job == prev_job and same_place:
+            if place:
+                st["last_place"][uid] = place
             continue  # confirmed same server as last sighting -- never a new event, regardless of any gap
         if job and prev_job and job != prev_job:
             st["pending"][uid] = now  # real hop: we already have the new job id, don't wait on it
+        elif place and prev_place and place != prev_place:
+            # Direct switch into a different game/universe (even if new server's gameId is hidden/VIP)
+            st["pending"].setdefault(uid, now)
         elif last is None or now - last > grace:
             st["pending"].setdefault(uid, now)
+        elif place and prev_place is None:
+            # Seamless cutover backfill for pre-existing state entries without triggering false alerts
+            st["last_place"][uid] = place
         first = st["pending"].get(uid)
         if first is not None and (job or now - first >= wait_for_job):
             ready.append(uid)
             if job:
                 st["last_job"][uid] = job
+            elif prev_job and place and prev_place and place != prev_place:
+                st["last_job"].pop(uid, None)
+            if place:
+                st["last_place"][uid] = place
     for uid in [u for u, t in st["pending"].items() if now - t > PENDING_MAX_AGE]:
         del st["pending"][uid]
     for uid in [u for u, t in st["hunt"].items() if now - t > 86400]:
         del st["hunt"][uid]
-    for uid in [u for u in st["last_job"] if u not in st["hunt"]]:
+    for uid in [u for u in list(st["last_job"]) if u not in st["hunt"]]:
         del st["last_job"][uid]
+    for uid in [u for u in list(st["last_place"]) if u not in st["hunt"]]:
+        del st["last_place"][uid]
     return ready
 
 
@@ -587,9 +642,12 @@ def main():
     polls = good_polls = sent = 0
     sweep_secs = []
     pstats = Counter()
+    poll_cache = {}
+    ring_slots = {"admin": 0, "video-stars": max(1, len(accounts) // 2), "developers": max(1, len(accounts) // 4)}
+    acct_offset = ring_slots.get(args.notifier, sum(ord(ch) for ch in args.notifier) % max(1, len(accounts)))
     while True:
         t0 = time.time()
-        best, ok, complete = poll(accounts, ids, polls, pstats)
+        best, ok, complete = poll(accounts, ids, polls, pstats, cache=poll_cache, acct_offset=acct_offset)
         polls += 1
         sweep_secs.append(time.time() - t0)
         if ok:

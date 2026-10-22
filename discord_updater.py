@@ -33,12 +33,13 @@ import re
 import requests
 from pathlib import Path
 
-from join_notifier import JOIN_REDIRECT_BASE
+from join_notifier import JOIN_REDIRECT_BASE, md_escape
 
 ROBLOX_EMOJI = "<:roblox:1551329066337050754>"
 DEFAULT_COLOR = 3168504  # Admin Tracker #305778
 TARGET_GAME_URL = "https://www.roblox.com/games/74205509034203/The-Hunt-Roblox-20"
 TARGET_PLACE_ID = "74205509034203"
+TARGET_UNIVERSE_ID = 10766456501
 MAX_DESC = 4000
 
 def parse_color(val):
@@ -61,19 +62,19 @@ def slugify(name: str) -> str:
     name = re.sub(r'-+', '-', name).strip('-')
     return name or "Game"
 
-def get_game_link(place_id, universe_id, last_location: str):
+def get_game_link(place_id, universe_id, last_location: str, target_place_id: str = TARGET_PLACE_ID, target_game_name: str = None):
     if place_id:
-        name = last_location.strip() if last_location and last_location.strip() else "Game"
-        safe_name = slugify(name) if name != "Game" else "Game"
+        raw_name = (last_location or "").strip() or (target_game_name or "").strip() or "Game"
+        safe_name = slugify(raw_name) if raw_name != "Game" else "Game"
         url = f"https://www.roblox.com/games/{place_id}/{safe_name}"
         if str(place_id) == TARGET_PLACE_ID:
             url = TARGET_GAME_URL
-            name = "The Hunt: Roblox 20"
-        return name, url
-    if universe_id:
-        name = last_location.strip() if last_location else "Game"
-        url = f"https://www.roblox.com/games/{universe_id}/Game"
-        return name, url
+            raw_name = "The Hunt: Roblox 20"
+        return raw_name, url
+    if target_place_id:
+        raw_name = (last_location or "").strip() or (target_game_name or "").strip() or ("The Hunt: Roblox 20" if str(target_place_id) == TARGET_PLACE_ID else "Game")
+        url = TARGET_GAME_URL if str(target_place_id) == TARGET_PLACE_ID else f"https://www.roblox.com/games/{target_place_id}/Game"
+        return raw_name, url
     return None, None
 
 def empty_message(title: str) -> str:
@@ -89,19 +90,33 @@ def empty_message(title: str) -> str:
 def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=ROBLOX_EMOJI, any_game=None):
     target = data.get("target_game_players", [])
     other = data.get("other_game_players", [])
+    meta = data.get("meta") or {}
     if any_game is None:
-        any_game = bool(data.get("meta", {}).get("anyGame", False))
+        any_game = bool(meta.get("anyGame", False))
+    target_place = str(meta.get("targetPlaceId") or TARGET_PLACE_ID)
+    raw_univ = meta.get("targetUniverseId")
+    try:
+        target_universe = int(raw_univ) if raw_univ is not None else (TARGET_UNIVERSE_ID if target_place == TARGET_PLACE_ID else None)
+    except (TypeError, ValueError):
+        target_universe = TARGET_UNIVERSE_ID if target_place == TARGET_PLACE_ID else None
+    target_game_name = meta.get("targetGameName")
 
-    # Filter per final spec 2026-09-22 + 2026-09-22 clarification (any_game mode relaxes "Hunt visible" to
-    # "any game visible" throughout, since there's no single target game to match against):
-    # - Online(1), InStudio(3), missing/null -> Do not show (exclude)
-    # - InGame hidden even when Following (isFollowing true, no placeId) -> Do not show
-    # - InGame hidden NOT Following (isFollowing false, no placeId, presenceType 2) -> Keep as Unknown (Must Follow/Game Status Hidden)
-    # - InGame Hunt visible (public, no Follow needed) -> Keep as plain Hunt link
-    # - InGame Hunt visible when Following -> Keep as Must Follow to Join
-    # - InGame non-Hunt visible -> Do not show (any_game mode: DO show, this is the whole point)
-    # - Offline (0) -> Do not show, except Offline Hunt visible when Following -> Keep as Appearing Offline
-    # - Offline non-Hunt visible -> Do not show
+    def _is_target_visible(u):
+        pid = u.get("placeId") or u.get("rootPlaceId")
+        if pid is None:
+            return False
+        if any_game:
+            return True
+        if str(u.get("placeId")) == target_place or str(u.get("rootPlaceId")) == target_place:
+            return True
+        if target_universe is not None and u.get("universeId") is not None:
+            try:
+                if int(u.get("universeId")) == target_universe:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        return False
+
     filtered = []
     for u in target + other:
         pid = u.get("placeId") or u.get("rootPlaceId")
@@ -114,8 +129,7 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
         # Exclude Online, InStudio, missing/null per clarification
         if ptype_int in (1, 3) or ptype_int is None:
             continue
-        is_visible_game = pid is not None and (any_game or str(pid) == TARGET_PLACE_ID)
-        if is_visible_game:
+        if _is_target_visible(u):
             filtered.append(u)
             continue
         # Hidden InGame cases
@@ -133,14 +147,13 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
 
     # Sort by playing hierarchy: visible game (public) -> visible game (Must Follow) -> Unknown
     def sort_key(u):
-        pid = u.get("placeId") or u.get("rootPlaceId")
         is_following = bool(u.get("isFollowing"))
         ptype = u.get("presenceType")
         try:
             ptype_int = int(ptype) if ptype is not None else None
         except:
             ptype_int = None
-        is_visible = pid is not None and (any_game or str(pid) == TARGET_PLACE_ID)
+        is_visible = _is_target_visible(u)
         if is_visible and not is_following and ptype_int == 2:
             prio = 0  # Playing: <game> (public)
         elif is_visible and is_following:
@@ -170,22 +183,17 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
 
     lines = []
     for u in filtered:
-        display = u.get("displayName") or u.get("username") or "Unknown"
-        username = u.get("username") or "Unknown"
+        display = md_escape(u.get("displayName") or u.get("username") or "Unknown")
+        username = md_escape(u.get("username") or "Unknown")
         user_id = u.get("userId")
         profile = f"https://www.roblox.com/users/{user_id}/profile" if user_id else "https://www.roblox.com/"
         place_id = u.get("placeId")
         root_place = u.get("rootPlaceId")
         universe_id = u.get("universeId")
-        last_loc = u.get("lastLocation") or ""
+        last_loc = u.get("gameName") or u.get("lastLocation") or ""
         effective_place = place_id or root_place
-        game_name, game_url = get_game_link(effective_place, universe_id, last_loc)
+        game_name, game_url = get_game_link(effective_place, universe_id, last_loc, target_place_id=target_place, target_game_name=target_game_name)
 
-        # Determine label by presenceType (any_game: whichever game is visible, not just Hunt)
-        # - InGame visible via Follow (isFollowing true) -> Must Follow to Join with colon
-        # - Offline visible via Follow -> Appearing Offline - Must Follow to Join (no colon)
-        # - InGame visible, public (isFollowing false) -> plain game link
-        # - InGame hidden NOT Following -> Unknown (Must Follow/Game Status Hidden)
         pid_check = u.get("placeId") or u.get("rootPlaceId")
         is_following = bool(u.get("isFollowing"))
         job_id = u.get("gameId")
@@ -195,9 +203,8 @@ def build_embeds(data: dict, title="Admin Tracker", color=DEFAULT_COLOR, emoji=R
         except:
             ptype_int = None
 
-        is_visible = pid_check is not None and (any_game or str(pid_check) == TARGET_PLACE_ID)
-        if is_visible:
-            label = game_name or "Game"
+        if _is_target_visible(u):
+            label = md_escape(game_name or "Game")
             if ptype_int == 0:
                 # Offline but shown via Following = Appearing Offline (no colon per spec)
                 playing = f"[{label}]({game_url}) (Appearing Offline - Must Follow to Join)"

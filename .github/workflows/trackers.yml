@@ -95,10 +95,10 @@ jobs:
             TESTING_NAMES=$(jq -r 'map(.id) | join(", ")' <<< "$TRACKERS")
             echo "::notice::Paused -- running only anyGame testing trackers this tick: $TESTING_NAMES"
           fi
-          # scanEvery throttles only the scan -> merge -> embed-update pipeline (redundant with the
-          # notifier, which already polls presence for the same people); notify/follow always run every
-          # tick regardless. Only applies to the normal "all trackers" cadence -- a manual dispatch for
-          # one specific tracker (testing) always scans, regardless of the clock.
+          # scanEvery throttles the scan -> merge -> follow pipeline (redundant with the notifier,
+          # which already polls presence for the same people); notify always runs every tick regardless.
+          # Only applies to the normal "all trackers" cadence -- a manual dispatch for one specific
+          # tracker (testing) always scans, regardless of the clock.
           if [ -n "$SELECTED" ] && [ "$SELECTED" != "all" ]; then
             SCAN_TRACKERS="$TRACKERS"
           else
@@ -167,6 +167,14 @@ jobs:
           ROBLOSECURITY_10: ${{ secrets.ROBLOSECURITY_10 }}
           ROBLOSECURITY_11: ${{ secrets.ROBLOSECURITY_11 }}
           ROBLOSECURITY_12: ${{ secrets.ROBLOSECURITY_12 }}
+          ROBLOSECURITY_13: ${{ secrets.ROBLOSECURITY_13 }}
+          ROBLOSECURITY_14: ${{ secrets.ROBLOSECURITY_14 }}
+          ROBLOSECURITY_15: ${{ secrets.ROBLOSECURITY_15 }}
+          ROBLOSECURITY_16: ${{ secrets.ROBLOSECURITY_16 }}
+          ROBLOSECURITY_17: ${{ secrets.ROBLOSECURITY_17 }}
+          ROBLOSECURITY_18: ${{ secrets.ROBLOSECURITY_18 }}
+          ROBLOSECURITY_19: ${{ secrets.ROBLOSECURITY_19 }}
+          ROBLOSECURITY_20: ${{ secrets.ROBLOSECURITY_20 }}
         run: |
           ARGS=()
           if [ -n "$MAX_MEMBERS" ]; then ARGS+=(--max-members "$MAX_MEMBERS"); fi
@@ -290,7 +298,7 @@ jobs:
   # ---------------------------------------------------------------------------
   follow:
     needs: [plan, merge]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.trackers != '[]' }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.scan_trackers != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
@@ -299,7 +307,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.trackers) }}
+        include: ${{ fromJSON(needs.plan.outputs.scan_trackers) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -337,6 +345,14 @@ jobs:
           ROBLOSECURITY_10: ${{ secrets.ROBLOSECURITY_10 }}
           ROBLOSECURITY_11: ${{ secrets.ROBLOSECURITY_11 }}
           ROBLOSECURITY_12: ${{ secrets.ROBLOSECURITY_12 }}
+          ROBLOSECURITY_13: ${{ secrets.ROBLOSECURITY_13 }}
+          ROBLOSECURITY_14: ${{ secrets.ROBLOSECURITY_14 }}
+          ROBLOSECURITY_15: ${{ secrets.ROBLOSECURITY_15 }}
+          ROBLOSECURITY_16: ${{ secrets.ROBLOSECURITY_16 }}
+          ROBLOSECURITY_17: ${{ secrets.ROBLOSECURITY_17 }}
+          ROBLOSECURITY_18: ${{ secrets.ROBLOSECURITY_18 }}
+          ROBLOSECURITY_19: ${{ secrets.ROBLOSECURITY_19 }}
+          ROBLOSECURITY_20: ${{ secrets.ROBLOSECURITY_20 }}
         run: |
           if [ ! -f "$RESULTS" ]; then
             echo "No $RESULTS, skipping follow"
@@ -432,6 +448,14 @@ jobs:
           ROBLOSECURITY_10: ${{ secrets.ROBLOSECURITY_10 }}
           ROBLOSECURITY_11: ${{ secrets.ROBLOSECURITY_11 }}
           ROBLOSECURITY_12: ${{ secrets.ROBLOSECURITY_12 }}
+          ROBLOSECURITY_13: ${{ secrets.ROBLOSECURITY_13 }}
+          ROBLOSECURITY_14: ${{ secrets.ROBLOSECURITY_14 }}
+          ROBLOSECURITY_15: ${{ secrets.ROBLOSECURITY_15 }}
+          ROBLOSECURITY_16: ${{ secrets.ROBLOSECURITY_16 }}
+          ROBLOSECURITY_17: ${{ secrets.ROBLOSECURITY_17 }}
+          ROBLOSECURITY_18: ${{ secrets.ROBLOSECURITY_18 }}
+          ROBLOSECURITY_19: ${{ secrets.ROBLOSECURITY_19 }}
+          ROBLOSECURITY_20: ${{ secrets.ROBLOSECURITY_20 }}
         run: |
           ARGS=()
           case "$MODE" in

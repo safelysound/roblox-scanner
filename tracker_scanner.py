@@ -26,6 +26,7 @@ from developer_scanner import (
     _profile_shows_hunt,
     _get_followings,
     _cookie_headers,
+    _set_pool_followings_hint,
     fetch_user_info,
     fetch_user_infos,
     fetch_presences,
@@ -115,17 +116,18 @@ def fetch_group_members(group_id, max_members=None, delay=0.6, verbose=False):
         print(f"Fetched {len(members)} members for group {group_id}", file=sys.stderr)
     return members
 
-def load_tracker_config(tracker_id):
+def load_tracker_config(tracker_id, return_settings=False):
     p = Path("config/trackers.yaml")
     if not p.exists():
         print(f"{p} not found", file=sys.stderr)
-        return None
+        return (None, {}) if return_settings else None
     data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    settings = data.get("settings") or {}
     for t in data.get("trackers", []):
         if t.get("id") == tracker_id:
-            return t
+            return (t, settings) if return_settings else t
     print(f"Tracker {tracker_id} not found in {p}", file=sys.stderr)
-    return None
+    return (None, settings) if return_settings else None
 
 def parse_args():
     p=argparse.ArgumentParser(description="Universal Tracker Scanner (group + ID list, sharded)")
@@ -134,7 +136,7 @@ def parse_args():
     p.add_argument("--user-ids-file", type=str, default="", help="IDs file (overrides tracker)")
     p.add_argument("--extra-ids", type=str, default="", help="Comma-separated extra IDs")
     p.add_argument("--extra-ids-file", type=str, default="", help="Extra IDs file")
-    p.add_argument("--place-id", type=int, default=DEFAULT_PLACE_ID, help="Target PlaceId")
+    p.add_argument("--place-id", type=int, default=None, help="Target PlaceId")
     p.add_argument("--universe-id", type=int, default=None, help="Target UniverseId")
     p.add_argument("--json", type=str, default="", help="Output JSON path")
     p.add_argument("--csv", type=str, default="", help="Output CSV path")
@@ -150,6 +152,7 @@ def resolve_tracker(args):
     ids_file = args.user_ids_file
     extra_ids = []
     place_id = args.place_id
+    cfg_universe = None
     if args.extra_ids:
         for part in args.extra_ids.replace(",", " ").split():
             if part.isdigit():
@@ -160,10 +163,17 @@ def resolve_tracker(args):
             if line and not line.startswith("#") and line.isdigit():
                 extra_ids.append(int(line))
     if args.tracker:
-        cfg = load_tracker_config(args.tracker)
+        cfg, settings = load_tracker_config(args.tracker, return_settings=True)
         if not cfg:
             print(f"Failed to load tracker {args.tracker}", file=sys.stderr)
             sys.exit(1)
+        if place_id is None:
+            place_id = int(settings.get("targetPlaceId", DEFAULT_PLACE_ID))
+        if settings.get("targetUniverseId") is not None:
+            try:
+                cfg_universe = int(settings["targetUniverseId"])
+            except (TypeError, ValueError):
+                cfg_universe = None
         if group_id is None and "groupId" in cfg:
             group_id = int(cfg["groupId"])
         if not ids_file and cfg.get("idsFile"):
@@ -179,7 +189,10 @@ def resolve_tracker(args):
                     extra_ids.append(int(line))
         any_game = bool(cfg.get("anyGame", False))
     else:
+        if place_id is None:
+            place_id = DEFAULT_PLACE_ID
         any_game = False
+    args._cfg_universe = cfg_universe
     return group_id, ids_file, extra_ids, place_id, any_game
 
 def tracker_main_logic():
@@ -264,27 +277,33 @@ def tracker_main_logic():
         if verbose:
             print("any_game mode: tracking every game members are in, not one fixed target", file=sys.stderr)
     else:
-        universe=args.universe_id or resolve_universe_id(place_id) or DEFAULT_UNIVERSE_ID
+        universe=args.universe_id or resolve_universe_id(place_id) or getattr(args, "_cfg_universe", None) or DEFAULT_UNIVERSE_ID
         game_name=resolve_game_name(universe)
         if game_name and verbose:
             print(f'Target game: "{game_name}" Universe {universe}', file=sys.stderr)
     ids_for_presence=[m["userId"] for m in members_for_presence]
     try: _log_cookie_status()
     except Exception as e: print(f"cookie status check failed: {type(e).__name__}", file=sys.stderr)
-    presences=fetch_presences(ids_for_presence)
-    print(f"Got {len(presences)}/{len(ids_for_presence)} presence responses", file=sys.stderr)
-    # isFollowing pool
+    # Load per-account followings FIRST (staggered by shard index across parallel runners) so
+    # fetch_presences can query each pool account's followed users directly without duplicate fetches.
     headers_for_follow=_cookie_headers()
     pool=_get_all_cookies()
     followings=set()
+    account_followings={}
     my_ids=[]
-    for key, ck in pool:
+    if pool:
+        offset = ((args.shard or 0) * max(1, len(pool) // 3)) % len(pool)
+        ordered_pool = pool[offset:] + pool[:offset]
+    else:
+        ordered_pool = []
+    for key, ck in ordered_pool:
         hdr={"Cookie": f".ROBLOSECURITY={ck}"}
         mid=_get_my_id(hdr)
         if mid:
             my_ids.append(mid)
             f=_get_followings(mid, hdr)
             print(f"pool {key} -> my_id {mid} following {len(f)}", file=sys.stderr)
+            account_followings[key]=f
             followings.update(f)
     if not pool:
         my_id=_get_my_id(headers_for_follow)
@@ -297,6 +316,12 @@ def tracker_main_logic():
     else:
         my_id=None
         print("Pool no my_id - unauthenticated", file=sys.stderr)
+    _set_pool_followings_hint(pool, account_followings)
+    try:
+        presences=fetch_presences(ids_for_presence)
+    finally:
+        _set_pool_followings_hint([], {})
+    print(f"Got {len(presences)}/{len(ids_for_presence)} presence responses", file=sys.stderr)
     target=[]; other=[]; offline=[]
     game_name_cache={}  # universeId -> resolved name, any_game mode only (avoid re-resolving per person)
     def _cached_game_name(u):
@@ -338,14 +363,13 @@ def tracker_main_logic():
                     print(f"per-user isFollowing true for {uid}", file=sys.stderr)
             except: pass
         if not any_game and ptype==2 and place_id_p is None and root_place is None and univ is None:
-            # Hunt-specific fallback (profile page sometimes reveals it even when presence hides the place).
-            # Not meaningful in any_game mode -- there's no single game to confirm via this trick.
-            if _profile_shows_hunt(uid, headers_for_follow):
-                print(f"profile scrape: {uid} shows Hunt via profile", file=sys.stderr)
-                place_id_p=74205509034203
-                root_place=74205509034203
-                univ=10766456501
-                last_loc="The Hunt: Roblox 20"
+            # Profile-scrape fallback (profile page sometimes reveals target game even when presence hides it).
+            if _profile_shows_hunt(uid, headers_for_follow, target_place_id=place_id, target_universe_id=universe):
+                print(f"profile scrape: {uid} shows target game via profile", file=sys.stderr)
+                place_id_p=place_id
+                root_place=place_id
+                univ=universe or DEFAULT_UNIVERSE_ID
+                last_loc=game_name or ("The Hunt: Roblox 20" if int(place_id)==DEFAULT_PLACE_ID else "")
                 is_following=True
                 is_target=True
                 is_in_game=True

@@ -39,7 +39,10 @@ def _normalize(raw):
 
 def get_all_cookies():
     pool=[]; seen=set()
-    for k in ["ROBLOX_COOKIE","ROBLOSECURITY","ROBLOSECURITY_1","ROBLOSECURITY_2","ROBLOSECURITY_3","ROBLOSECURITY_4","ROBLOSECURITY_5","ROBLOSECURITY_6"]:
+    keys = ["ROBLOX_COOKIE", "ROBLOSECURITY"] + [f"ROBLOSECURITY_{i}" for i in range(1, 21)]
+    # Reverse pool order so newer accounts (fewer followings) absorb new follows first instead of
+    # overloading ROBLOX_COOKIE alone.
+    for k in reversed(keys):
         v=os.environ.get(k,"")
         if v and v.strip():
             v=_normalize(v)
@@ -53,41 +56,57 @@ def get_csrf(sess):
         tok=r.headers.get("x-csrf-token")
         if tok: return tok
     except: pass
+    try:
+        import re
+        rh=sess.get("https://www.roblox.com/home", timeout=10)
+        if rh.status_code==200:
+            m=re.search(r'<meta\s+name="csrf-token"\s+[^>]*data-token="([^"]+)"', rh.text) or re.search(r'<meta\s+name="csrf-token"\s+[^>]*content="([^"]+)"', rh.text)
+            if m: return m.group(1)
+    except: pass
     return None
 
 def follow_one(sess, uid):
     url=FOLLOW_API.format(uid=uid)
-    try:
-        r=sess.post(url, timeout=15)
-        if r.status_code in (200,201):
-            return ("ok", r.status_code, "")
-        if r.status_code==400 and "already" in r.text.lower():
-            return ("already", r.status_code, r.text[:200])
-        if r.status_code==429:
-            retry_after=r.headers.get("Retry-After")
-            try: wait=int(float(retry_after)) if retry_after else 5
-            except: wait=5
-            return ("retry", wait, f"429 {r.text[:120]}")
-        if r.status_code==403:
-            body=r.text.lower()
-            # Try to refresh csrf if provided
-            if "x-csrf-token" in r.headers:
-                try: sess.headers["x-csrf-token"]=r.headers["x-csrf-token"]
-                except: pass
-            if "challenge" in body:
-                return ("challenge", r.status_code, r.text[:200])
-            return ("fail", r.status_code, r.text[:200])
-        return ("fail", r.status_code, r.text[:300])
-    except Exception as e:
-        return ("error", 0, str(e))
+    for csrf_try in range(2):
+        try:
+            r=sess.post(url, timeout=15)
+            if r.status_code in (200,201):
+                return ("ok", r.status_code, "")
+            if r.status_code==400 and "already" in r.text.lower():
+                return ("already", r.status_code, r.text[:200])
+            if r.status_code==429:
+                retry_after=r.headers.get("Retry-After")
+                try: wait=int(float(retry_after)) if retry_after else 42
+                except: wait=42
+                # friends.roblox.com enforces ~2 follows / ~40s per runner IP while returning Retry-After: 5;
+                # waiting at least 42s lets the IP sliding window refill instead of burning 16 fast retries.
+                return ("retry", max(wait, 42), f"429 {r.text[:120]}")
+            if r.status_code==403:
+                body=r.text.lower()
+                if "x-csrf-token" in r.headers and csrf_try == 0 and "challenge" not in body:
+                    sess.headers["x-csrf-token"]=r.headers["x-csrf-token"]
+                    continue
+                if "challenge" in body:
+                    return ("challenge", r.status_code, r.text[:200])
+                return ("fail", r.status_code, r.text[:200])
+            return ("fail", r.status_code, r.text[:300])
+        except Exception as e:
+            return ("error", 0, str(e))
+    return ("fail", 403, "csrf retry exhausted")
 
 def load_unknowns(json_path, tracker=None):
-    data=json.loads(Path(json_path).read_text())
-    # Reuse same filtering as discord_updater for Unknown
+    data=json.loads(Path(json_path).read_text(encoding="utf-8"))
     target=data.get("target_game_players",[])
     other=data.get("other_game_players",[])
-    # Use same TARGET_PLACE_ID
-    TARGET="74205509034203"
+    meta=data.get("meta") or {}
+    any_game=bool(meta.get("anyGame", False))
+    target_place=str(meta.get("targetPlaceId") or "74205509034203")
+    raw_univ=meta.get("targetUniverseId")
+    try:
+        target_universe=int(raw_univ) if raw_univ is not None else (10766456501 if target_place=="74205509034203" else None)
+    except (TypeError, ValueError):
+        target_universe=10766456501 if target_place=="74205509034203" else None
+
     filtered=[]
     for u in target+other:
         pid=u.get("placeId") or u.get("rootPlaceId")
@@ -97,11 +116,18 @@ def load_unknowns(json_path, tracker=None):
         is_following=bool(u.get("isFollowing"))
         if ptype_int in (1,3) or ptype_int is None:
             continue
-        if pid is not None and str(pid)==TARGET:
-            continue # Hunt visible, not Unknown
+        if pid is not None:
+            if any_game or str(u.get("placeId"))==target_place or str(u.get("rootPlaceId"))==target_place:
+                continue  # target game already visible, not Unknown
+            if target_universe is not None and u.get("universeId") is not None:
+                try:
+                    if int(u.get("universeId"))==target_universe:
+                        continue
+                except (TypeError, ValueError):
+                    pass
         if ptype_int==2 and pid is None and u.get("universeId") is None:
             if is_following:
-                continue # InGame hidden even when Following -> Do not show per spec
+                continue  # InGame hidden even when Following -> Do not show per spec
             else:
                 filtered.append(u)
                 continue

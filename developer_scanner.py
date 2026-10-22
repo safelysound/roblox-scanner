@@ -31,7 +31,7 @@ DEFAULT_UNIVERSE_ID = 10766456501
 # Reads alt cookie that Follows the 102 devs. Presence then returns InGame instead of Offline.
 # Supports: ROBLOSECURITY, ROBLOX_COOKIE, ROBLOSECURITY_1 (all read, first found used)
 def _get_roblox_cookie() -> str:
-    for key in ["ROBLOX_COOKIE", "ROBLOSECURITY"] + [f"ROBLOSECURITY_{i}" for i in range(1, 13)]:
+    for key in ["ROBLOX_COOKIE", "ROBLOSECURITY"] + [f"ROBLOSECURITY_{i}" for i in range(1, 21)]:
         val = os.environ.get(key, "")
         if val and val.strip():
             v = val.strip().strip('"').strip("'")
@@ -52,7 +52,7 @@ def _get_all_cookies():
     """Return list of (key, cookie) for all configured accounts, deduped by value. ROBLOX_COOKIE takes priority."""
     pool=[]
     seen=set()
-    for key in ["ROBLOX_COOKIE", "ROBLOSECURITY"] + [f"ROBLOSECURITY_{i}" for i in range(1, 13)]:
+    for key in ["ROBLOX_COOKIE", "ROBLOSECURITY"] + [f"ROBLOSECURITY_{i}" for i in range(1, 21)]:
         val = __import__("os").environ.get(key, "")
         if val and val.strip():
             v = val.strip().strip('"').strip("'")
@@ -83,32 +83,42 @@ def _log_cookie_status():
         return False
 
 def _get_my_id(headers):
-    # Use Session to preserve RBXID etc; also check www.roblox.com/home for auth
+    # Query lightweight /v1/users/authenticated JSON endpoint first (with 429 backoff);
+    # keep /home HTML check only as a fallback.
     try:
         import requests as _req, sys, re
-        ck = headers.get("Cookie","")
-        # First check if www.roblox.com sees us as logged in (bypasses 9002)
+        ck = headers.get("Cookie", "")
+        if not ck:
+            return None
+        for attempt in range(1, 5):
+            r = _req.get(
+                "https://users.roblox.com/v1/users/authenticated",
+                timeout=10,
+                headers={"User-Agent": "Mozilla/5.0", "Cookie": ck, "Referer": "https://www.roblox.com/", "Origin": "https://www.roblox.com", "Accept": "application/json"},
+            )
+            if r.status_code == 200:
+                uid = r.json().get("id")
+                print(f"my_id {uid} ok", file=sys.stderr)
+                return uid
+            if r.status_code == 429 and attempt < 4:
+                try:
+                    wait = float(r.headers.get("Retry-After") or 0)
+                except ValueError:
+                    wait = 0.0
+                time.sleep(max(wait, 2.0 * attempt))
+                continue
+            print(f"my_id status {r.status_code} body {r.text[:200]!r}", file=sys.stderr)
+            break
         try:
-            s=_req.Session()
-            s.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36", "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language":"en-US,en;q=0.9", "Referer":"https://www.roblox.com/", "Cookie": ck})
-            rh=s.get("https://www.roblox.com/home", timeout=10)
+            s = _req.Session()
+            s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9", "Referer": "https://www.roblox.com/", "Cookie": ck})
+            rh = s.get("https://www.roblox.com/home", timeout=10)
             auth_m = re.search(r'"isAuthenticated"\s*:\s*true', rh.text)
             uid_m = re.search(r'"userId"\s*:\s*(\d+)', rh.text)
-            print(f"home check status {rh.status_code} isAuth {bool(auth_m)} hasCookie {bool(ck)}", file=sys.stderr)
             if auth_m and uid_m:
                 return int(uid_m.group(1))
         except Exception as e:
             print(f"home auth check error {e}", file=sys.stderr)
-        r=_req.get("https://users.roblox.com/v1/users/authenticated", timeout=10, headers={"User-Agent":"Mozilla/5.0","Cookie": ck, "Referer":"https://www.roblox.com/", "Accept":"application/json"})
-        if r.status_code==200:
-            print(f"my_id {r.json().get('id')} ok", file=sys.stderr)
-            return r.json().get("id")
-        else:
-            print(f"my_id status {r.status_code} body {r.text[:200]!r}", file=sys.stderr)
-            r2=_req.get("https://users.roblox.com/v1/users/authenticated", timeout=10, headers={"User-Agent":"Mozilla/5.0","Cookie": ck, "Referer":"https://www.roblox.com/", "Origin":"https://www.roblox.com"})
-            print(f"my_id retry status {r2.status_code} body {r2.text[:200]!r}", file=sys.stderr)
-            if r2.status_code==200:
-                return r2.json().get("id")
     except Exception as e:
         print(f"my_id error {e}", file=__import__("sys").stderr)
     return None
@@ -145,12 +155,13 @@ def _get_csrf_from_session(sess):
     except: pass
     return None
 
-def _profile_shows_hunt(user_id, headers):
+def _profile_shows_hunt(user_id, headers, target_place_id=DEFAULT_PLACE_ID, target_universe_id=DEFAULT_UNIVERSE_ID):
     """Profile scraping fallback for hidden even when Following (e.g., 91512961, 92501615).
     Tries multiple endpoints that the website uses to show Hunt when Following.
     Free fix: get CSRF from HTML meta (not auth.roblox.com which 401s), then presence with CSRF — tries pool.
     """
     import requests as _req, re, sys
+    target_pid_s = str(target_place_id)
     # Try pool in order so the cookie that actually follows reveals Hunt
     pool=_get_all_cookies()
     # Build candidate cookies: pool first, then fallback to headers cookie
@@ -173,19 +184,14 @@ def _profile_shows_hunt(user_id, headers):
             h3={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Content-Type":"application/json","Accept":"application/json","Referer":f"https://www.roblox.com/users/{user_id}/profile","Origin":"https://www.roblox.com","Cookie": try_ck, "x-csrf-token": tok}
             r3=sess.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=h3)
             print(f"profile scrape {user_id}: CSRF presence via {try_ck[:14]}... status {r3.status_code}, body {r3.text[:500]!r}", file=sys.stderr)
-            # Also log isFollowing check for that cookie's followings
-            try:
-                # quick check if this cookie follows target via friends API (less verbose)
-                pass
-            except: pass
             if r3.status_code==200:
                 j=r3.json().get("userPresences",[{}])[0]
-                pid=j.get("placeId")
-                if pid and str(pid)=="74205509034203":
-                    print(f"profile scrape {user_id}: found Hunt via presence+CSRF pool", file=sys.stderr)
+                pid=j.get("placeId") or j.get("rootPlaceId")
+                if pid and str(pid)==target_pid_s:
+                    print(f"profile scrape {user_id}: found target via presence+CSRF pool", file=sys.stderr)
                     return True
-                if j.get("universeId")==10766456501:
-                    print(f"profile scrape {user_id}: found Hunt via universe+CSRF pool", file=sys.stderr)
+                if target_universe_id and j.get("universeId")==target_universe_id:
+                    print(f"profile scrape {user_id}: found target via universe+CSRF pool", file=sys.stderr)
                     return True
         except Exception as e:
             print(f"profile scrape {user_id} pool presence error {e}", file=sys.stderr)
@@ -218,42 +224,30 @@ def _profile_shows_hunt(user_id, headers):
                 logged = "Sign Out" in t or "data-userid" in t.lower()
                 print(f"profile scrape {user_id}: no CSRF in HTML loggedIn?{logged}", file=sys.stderr)
             found=False
-            if "74205509034203" in t:
-                print(f"profile scrape {user_id}: found Hunt via place in HTML", file=sys.stderr)
+            if target_pid_s in t:
+                print(f"profile scrape {user_id}: found target via place in HTML", file=sys.stderr)
                 found=True
-            if "10766456501" in t:
-                print(f"profile scrape {user_id}: found Hunt universe in HTML", file=sys.stderr)
+            if target_universe_id and str(target_universe_id) in t:
+                print(f"profile scrape {user_id}: found target universe in HTML", file=sys.stderr)
                 found=True
-            if "The Hunt: Roblox 20" in t or "The Hunt Roblox 20" in t:
+            if str(target_place_id) == str(DEFAULT_PLACE_ID) and ("The Hunt: Roblox 20" in t or "The Hunt Roblox 20" in t):
                 print(f"profile scrape {user_id}: found Hunt name in HTML", file=sys.stderr)
                 found=True
-            if "roblox.com/games/74205509034203" in t:
-                print(f"profile scrape {user_id}: found Hunt game link", file=sys.stderr)
+            if f"roblox.com/games/{target_pid_s}" in t:
+                print(f"profile scrape {user_id}: found target game link", file=sys.stderr)
                 found=True
             if found:
                 return True
-            if '"placeId":74205509034203' in t or '"placeId":"74205509034203"' in t:
-                print(f"profile scrape {user_id}: found Hunt via JSON placeId", file=sys.stderr)
+            if f'"placeId":{target_pid_s}' in t or f'"placeId":"{target_pid_s}"' in t:
+                print(f"profile scrape {user_id}: found target via JSON placeId", file=sys.stderr)
                 return True
-            # Check if profile shows Following (means alt cookie is seen as logged in)
-            is_following_html = 'data-following="true"' in t.lower() or 'following' in t.lower() and f'data-userid="{user_id}"' in t.lower()
-            # More direct: look for Follow/Following button near user id
-            if is_following_html:
-                print(f"profile scrape {user_id}: HTML shows Following marker", file=sys.stderr)
-            else:
-                # log snippet around Follow button
-                idx=t.lower().find("follow")
-                snippet = t[max(0,idx-200):idx+200] if idx>=0 else "no follow keyword"
-                print(f"profile scrape {user_id}: HTML not Following snippet {snippet[:300]!r}", file=sys.stderr)
-            print(f"profile scrape {user_id}: no Hunt in HTML (first 500 chars: {t[:500]!r})", file=sys.stderr)
     except Exception as e:
         print(f"profile scrape {user_id} HTML error {e}", file=sys.stderr)
-    # Try 2: Presence with CSRF — try each pool cookie until Hunt found (fresh CSRF per cookie)
+    # Try 2: Presence with CSRF — try each pool cookie until target found (fresh CSRF per cookie)
     try:
-        print(f"profile scrape {user_id}: trying {len(candidates)} pool cookies for Hunt", file=sys.stderr)
+        print(f"profile scrape {user_id}: trying {len(candidates)} pool cookies for target", file=sys.stderr)
         for try_ck in candidates:
             sess=_seeded_session(try_ck)
-            # Fresh CSRF per cookie (html from that cookie's session)
             tok=None
             try:
                 rh=sess.get("https://www.roblox.com/home", timeout=10, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Referer":"https://www.roblox.com/"})
@@ -263,36 +257,16 @@ def _profile_shows_hunt(user_id, headers):
                     m=_re2.search(r'<meta\s+name="csrf-token"\s+[^>]*content="([^"]+)"', rh.text)
                 if m:
                     tok=m.group(1)
-                    print(f"profile scrape {user_id}: HTML CSRF {tok[:6]}... via {try_ck[:14]} html len {len(rh.text)}", file=sys.stderr)
             except: pass
             if not tok:
-                # fallback to previous html token or auth
                 tok=csrf_from_html
-                if tok:
-                    print(f"profile scrape {user_id}: fallback to first HTML CSRF {tok[:6]}... via {try_ck[:14]}", file=sys.stderr)
             if not tok:
                 try:
                     r2=sess.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Cookie": try_ck, "Referer":"https://www.roblox.com/", "Origin":"https://www.roblox.com"})
                     tok=r2.headers.get("x-csrf-token")
-                    print(f"profile scrape {user_id}: CSRF auth {tok[:8] if tok else None} status {r2.status_code} via {try_ck[:14]}", file=sys.stderr)
                 except: pass
-            else:
-                print(f"profile scrape {user_id}: using fresh HTML CSRF {tok[:6]}... via {try_ck[:14]}", file=sys.stderr)
             if tok and _try_presence_with_ck(try_ck, tok):
                 return True
-            # Also try without Origin
-            if tok:
-                try:
-                    sess2=_seeded_session(try_ck)
-                    h3b={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Content-Type":"application/json","Accept":"application/json","Referer":"https://www.roblox.com/","Cookie": try_ck, "x-csrf-token": tok}
-                    r3b=sess2.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=h3b)
-                    print(f"profile scrape {user_id}: CSRF retry status {r3b.status_code}, body {r3b.text[:300]!r} via {try_ck[:14]}", file=sys.stderr)
-                    if r3b.status_code==200:
-                        j=r3b.json().get("userPresences",[{}])[0]
-                        if j.get("placeId") and str(j.get("placeId"))=="74205509034203":
-                            print(f"profile scrape {user_id}: found Hunt via presence+CSRF retry pool", file=sys.stderr)
-                            return True
-                except: pass
     except Exception as e:
         print(f"profile scrape {user_id} CSRF presence error {e}", file=sys.stderr)
     # Try 3: Mobile presence endpoint — loop pool
@@ -306,18 +280,18 @@ def _profile_shows_hunt(user_id, headers):
                 h_mobile["Referer"]="https://www.roblox.com/"
             sess_m=_seeded_session(try_ck)
             r_m = sess_m.post("https://presence.roblox.com/v1/presence/users", json={"userIds":[user_id]}, timeout=10, headers=h_mobile)
-            print(f"profile scrape {user_id}: mobile presence via {try_ck[:14]} status {r_m.status_code} body {r_m.text[:300]!r}", file=_sys3.stderr)
             if r_m.status_code==200:
                 j = r_m.json().get("userPresences",[{}])[0]
-                if j.get("placeId") and str(j.get("placeId"))=="74205509034203":
-                    print(f"profile scrape {user_id}: found Hunt via mobile presence pool", file=_sys3.stderr)
+                pid = j.get("placeId") or j.get("rootPlaceId")
+                if pid and str(pid)==target_pid_s:
+                    print(f"profile scrape {user_id}: found target via mobile presence pool", file=_sys3.stderr)
                     return True
-                if j.get("universeId")==10766456501:
-                    print(f"profile scrape {user_id}: found Hunt via mobile universe pool", file=_sys3.stderr)
+                if target_universe_id and j.get("universeId")==target_universe_id:
+                    print(f"profile scrape {user_id}: found target via mobile universe pool", file=_sys3.stderr)
                     return True
     except Exception as e:
         print(f"profile scrape {user_id} mobile presence error {e}", file=__import__("sys").stderr)
-    print(f"profile scrape {user_id}: no Hunt found after all tries", file=sys.stderr)
+    print(f"profile scrape {user_id}: no target found after all tries", file=sys.stderr)
     return False
 def _get_followings(my_id, headers):
     following=set()
@@ -326,42 +300,71 @@ def _get_followings(my_id, headers):
     try:
         import requests as _req
         ck=headers.get("Cookie","")
-        sess=_seeded_session(ck)
+        sess=_req.Session()
+        sess.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Referer": "https://www.roblox.com/",
+            "Origin": "https://www.roblox.com",
+            "Accept": "application/json",
+            "Cookie": ck,
+        })
         cursor=""
-        for _ in range(20):
+        while True:
             url=f"https://friends.roblox.com/v1/users/{my_id}/followings?limit=100&sortOrder=Asc"
             if cursor:
                 url+=f"&cursor={cursor}"
-            r=sess.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Referer":"https://www.roblox.com/", "Origin":"https://www.roblox.com", "Accept":"application/json"})
-            if r.status_code!=200:
-                print(f"followings fetch status {r.status_code} body {r.text[:200]!r}", file=__import__("sys").stderr)
-                # try without Origin fallback
-                if r.status_code in (401,403,429):
-                    r2=_req.get(url, timeout=10, headers={"User-Agent":"Mozilla/5.0","Cookie": headers.get("Cookie",""), "Referer":"https://www.roblox.com/"})
-                    print(f"followings retry status {r2.status_code}", file=__import__("sys").stderr)
-                    if r2.status_code!=200:
-                        break
-                    r=r2
-                else:
+            r=None
+            for attempt in range(1, 7):
+                r=sess.get(url, timeout=12)
+                if r.status_code==200:
                     break
+                if r.status_code==429:
+                    # friends.roblox.com enforces ~10 req / ~37s per runner IP while returning Retry-After: 5;
+                    # 13s steps cleanly bridge the sliding window without losing later pages/accounts.
+                    try:
+                        ra=float(r.headers.get("Retry-After") or 0)
+                    except ValueError:
+                        ra=0.0
+                    wait=max(ra, 13.0)
+                    print(f"followings 429 attempt {attempt}/6 for {my_id}, waiting {wait:.1f}s", file=__import__("sys").stderr)
+                    time.sleep(wait)
+                    continue
+                print(f"followings fetch status {r.status_code} body {r.text[:200]!r}", file=__import__("sys").stderr)
+                if r.status_code in (401,403) and attempt == 1:
+                    r2=_req.get(url, timeout=12, headers={"User-Agent":"Mozilla/5.0","Cookie": ck, "Referer":"https://www.roblox.com/"})
+                    print(f"followings retry status {r2.status_code}", file=__import__("sys").stderr)
+                    r=r2
+                break
+            if not r or r.status_code!=200:
+                break
             j=r.json()
             for e in j.get("data",[]):
                 following.add(e["id"])
             cursor=j.get("nextPageCursor")
             if not cursor:
                 break
+            time.sleep(0.25)
     except Exception as e:
         print(f"followings error {e}", file=__import__("sys").stderr)
     return following
 
 def resolve_universe_id(place_id: int) -> Optional[int]:
-    try:
-        r = requests.get(UNIVERSE_API.format(place_id=place_id), timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code == 200:
-            return r.json().get("universeId")
-    except:
-        pass
-    return DEFAULT_UNIVERSE_ID
+    for attempt in range(1, 4):
+        try:
+            r = requests.get(UNIVERSE_API.format(place_id=place_id), timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200:
+                uid = r.json().get("universeId")
+                if uid is not None:
+                    return uid
+            if r.status_code == 429 and attempt < 3:
+                time.sleep(2 * attempt)
+                continue
+        except Exception:
+            if attempt < 3:
+                time.sleep(1 + attempt)
+                continue
+        break
+    return DEFAULT_UNIVERSE_ID if int(place_id) == DEFAULT_PLACE_ID else None
 
 def resolve_game_name(universe_id: int) -> Optional[str]:
     try:
@@ -486,66 +489,227 @@ def fetch_user_info(user_id: int) -> Dict[str, Any]:
         pass
     return {"userId": user_id, "username": f"user{user_id}", "displayName": f"user{user_id}", "hasVerifiedBadge": False}
 
+_POOL_FOLLOWINGS_HINT = None  # (tuple(pool), {key: set(uids)}) set per scan run to avoid duplicate fetches
+
+
+def _set_pool_followings_hint(pool, account_followings):
+    global _POOL_FOLLOWINGS_HINT
+    _POOL_FOLLOWINGS_HINT = (tuple(pool), {k: set(v) for k, v in (account_followings or {}).items()})
+
+
+def _presence_rank(p):
+    """Rank how informative a presence dict is: has server gameId > has place/universe > InGame > Online/Offline."""
+    if not p:
+        return (-1, 0)
+    r = 1 if p.get("userPresenceType") == 2 else 0
+    if p.get("placeId") or p.get("rootPlaceId") or p.get("universeId"):
+        r += 2
+    if p.get("gameId"):
+        r += 4
+    return (r, p.get("userPresenceType") or 0)
+
+
+class _PresencePoolAccount:
+    """Session wrapper for a pool cookie during scan presence sweeps."""
+
+    def __init__(self, key: str, cookie: str):
+        self.key = key
+        self.csrf = None
+        self.blocked_until = 0.0
+        self.dead = False
+        self.fails = 0
+        self.sess = requests.Session()
+        self.sess.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Referer": "https://www.roblox.com/",
+            "Origin": "https://www.roblox.com",
+        })
+        self.sess.cookies.set(".ROBLOSECURITY", cookie, domain=".roblox.com")
+
+    def query(self, ids: List[int]):
+        for _ in range(2):
+            hdr = {"x-csrf-token": self.csrf} if self.csrf else {}
+            try:
+                r = self.sess.post(PRESENCE_API, json={"userIds": ids}, headers=hdr, timeout=15)
+            except requests.RequestException as e:
+                self.fails += 1
+                print(f"Presence error ({self.key}): {type(e).__name__}", file=sys.stderr)
+                return None
+            if r.status_code == 403 and r.headers.get("x-csrf-token"):
+                self.csrf = r.headers["x-csrf-token"]
+                continue
+            if r.status_code == 200:
+                self.fails = 0
+                return r.json().get("userPresences", [])
+            if r.status_code == 429:
+                try:
+                    wait = float(r.headers.get("Retry-After") or r.headers.get("retry-after") or 6.0)
+                except ValueError:
+                    wait = 6.0
+                self.blocked_until = time.time() + wait
+                return None
+            self.fails += 1
+            if r.status_code == 401 or self.fails >= 4:
+                self.dead = True
+            return None
+        return None
+
+
 def fetch_presences(user_ids: List[int]) -> Dict[int, Dict[str, Any]]:
-    # Batch 50 — authenticated if ROBLOSECURITY present (Follow bypass for Offline→Hunt)
-    headers = _cookie_headers()
+    """Fetch best-available presence per user across all configured pool cookies."""
+    if not user_ids:
+        return {}
+    pool = _get_all_cookies()
     if not hasattr(fetch_presences, "_logged"):
         _log_cookie_status()
         fetch_presences._logged = True
-    # Get CSRF for authenticated presence - try HTML first (free, not blocked) then auth fallback
-    csrf_token=None
-    sess_fp=None
+
+    # Multi-cookie pool path: round-robin initial sweep + targeted follower & hidden-InGame sweep across all accounts.
+    if len(pool) >= 2:
+        accounts = [_PresencePoolAccount(k, ck) for k, ck in pool]
+        results: Dict[int, Dict[str, Any]] = {}
+        answered_by: Dict[int, set] = {}
+
+        def _merge_batch(acct_key: str, pres_list: List[Dict[str, Any]]):
+            for p in pres_list:
+                uid = p.get("userId")
+                if uid is not None:
+                    answered_by.setdefault(uid, set()).add(acct_key)
+                    if _presence_rank(p) > _presence_rank(results.get(uid)):
+                        results[uid] = p
+
+        batches = [user_ids[i:i + PRESENCE_BATCH_SIZE] for i in range(0, len(user_ids), PRESENCE_BATCH_SIZE)]
+        for idx, batch in enumerate(batches):
+            delivered = False
+            for retry_round in range(2):
+                for off in range(len(accounts)):
+                    acct = accounts[(idx + off) % len(accounts)]
+                    if acct.dead or time.time() < acct.blocked_until:
+                        continue
+                    res = acct.query(batch)
+                    if res is not None:
+                        _merge_batch(acct.key, res)
+                        delivered = True
+                        time.sleep(0.35)
+                        break
+                if delivered:
+                    break
+                live_accts = [a for a in accounts if not a.dead]
+                if not live_accts:
+                    break
+                soonest = min(a.blocked_until for a in live_accts)
+                wait_s = max(0.2, min(soonest - time.time() + 0.2, 8.0))
+                if retry_round == 0:
+                    time.sleep(wait_s)
+            if not delivered:
+                # Fallback unauthenticated batch so a transient full-pool block never drops presence completely
+                try:
+                    ru = requests.post(PRESENCE_API, json={"userIds": batch}, timeout=15, headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"})
+                    if ru.status_code == 200:
+                        _merge_batch("unauth", ru.json().get("userPresences", []))
+                except Exception:
+                    pass
+
+        # Resolve per-account followings map (reusing pre-fetched hint when called from tracker_scanner/main)
+        acct_follow_map: Dict[str, set] = {}
+        if _POOL_FOLLOWINGS_HINT and _POOL_FOLLOWINGS_HINT[0] == tuple(pool):
+            acct_follow_map = _POOL_FOLLOWINGS_HINT[1]
+        else:
+            for k, ck in pool:
+                hdr = {"Cookie": f".ROBLOSECURITY={ck}"}
+                mid = _get_my_id(hdr)
+                if mid:
+                    acct_follow_map[k] = _get_followings(mid, hdr)
+
+        # Pass 2: query each account for its own followed users (catches both Appearing-Offline AND hidden-game
+        # followers) plus any user still InGame with hidden placeId across remaining pool accounts.
+        uid_set = set(user_ids)
+        for acct in accounts:
+            if acct.dead:
+                continue
+            my_follows = acct_follow_map.get(acct.key, set()) & uid_set
+            todo = []
+            for uid in user_ids:
+                cur = results.get(uid)
+                if cur and cur.get("gameId"):
+                    continue
+                if acct.key in answered_by.get(uid, ()):
+                    continue
+                is_hidden_ingame = bool(cur and cur.get("userPresenceType") == 2 and not (cur.get("placeId") or cur.get("rootPlaceId") or cur.get("universeId")))
+                if uid in my_follows or is_hidden_ingame:
+                    todo.append(uid)
+            for i in range(0, len(todo), PRESENCE_BATCH_SIZE):
+                chunk = todo[i:i + PRESENCE_BATCH_SIZE]
+                for attempt in range(2):
+                    if acct.dead:
+                        break
+                    wait_left = acct.blocked_until - time.time()
+                    if wait_left > 0:
+                        time.sleep(min(wait_left + 0.2, 8.0))
+                    res = acct.query(chunk)
+                    if res is not None:
+                        _merge_batch(acct.key, res)
+                        time.sleep(0.35)
+                        break
+
+        return results
+
+    # Single-cookie or unauthenticated path
+    headers = _cookie_headers()
+    csrf_token = None
+    sess_fp = None
     if "Cookie" in headers and headers.get("Cookie"):
         try:
-            import re
-            ck2=headers.get("Cookie","")
-            sess_fp=_seeded_session(ck2)
-            # Try HTML CSRF first (www.roblox.com not challenged)
-            try:
-                rh=sess_fp.get("https://www.roblox.com/home", timeout=10, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Referer":"https://www.roblox.com/"})
-                if rh.status_code==200:
-                    m=re.search(r'<meta\s+name="csrf-token"\s+[^>]*data-token="([^"]+)"', rh.text)
-                    if not m:
-                        m=re.search(r'<meta\s+name="csrf-token"\s+[^>]*content="([^"]+)"', rh.text)
-                    if not m:
-                        m=re.search(r"Roblox\.XsrfToken\.setToken\('([^']+)'\)", rh.text)
-                    if m:
-                        csrf_token=m.group(1)
-                        print(f"presence CSRF from HTML {csrf_token[:8]}...", file=sys.stderr)
-            except Exception as e:
-                print(f"presence HTML CSRF failed {e}", file=sys.stderr)
+            ck2 = headers.get("Cookie", "")
+            sess_fp = requests.Session()
+            sess_fp.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://www.roblox.com/", "Origin": "https://www.roblox.com"})
+            r_csrf = sess_fp.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"Cookie": ck2})
+            csrf_token = r_csrf.headers.get("x-csrf-token")
             if not csrf_token:
-                r_csrf=sess_fp.post("https://auth.roblox.com/v2/logout", timeout=10, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","Cookie": ck2, "Referer":"https://www.roblox.com/", "Origin":"https://www.roblox.com"})
-                csrf_token=r_csrf.headers.get("x-csrf-token")
-                print(f"presence CSRF auth status {r_csrf.status_code} tok {csrf_token[:8] if csrf_token else None}", file=sys.stderr)
+                sess_fp = _seeded_session(ck2)
+                csrf_token = _get_csrf_from_session(sess_fp)
             if csrf_token:
-                headers["x-csrf-token"]=csrf_token
-                headers["Referer"]="https://www.roblox.com/"
-                headers["Origin"]="https://www.roblox.com"
-                print(f"presence CSRF {csrf_token[:8]}...", file=sys.stderr)
+                headers["x-csrf-token"] = csrf_token
+                headers["Referer"] = "https://www.roblox.com/"
+                headers["Origin"] = "https://www.roblox.com"
         except Exception as e:
             print(f"presence CSRF fetch failed {e}", file=sys.stderr)
-    results={}
+    results = {}
     for i in range(0, len(user_ids), PRESENCE_BATCH_SIZE):
-        batch=user_ids[i:i+PRESENCE_BATCH_SIZE]
-        try:
-            if sess_fp and "x-csrf-token" in headers:
-                r=sess_fp.post(PRESENCE_API, json={"userIds": batch}, timeout=15, headers=headers)
-            else:
-                r=requests.post(PRESENCE_API, json={"userIds": batch}, timeout=15, headers=headers)
-            # If 403 due to bad cookie/CSRF, retry unauthenticated as fallback
-            if r.status_code==403 and "Cookie" in headers:
-                print("Presence 403 with cookie — retrying unauthenticated (cookie may be invalid/expired)", file=sys.stderr)
-                headers_no_cookie = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
-                r=requests.post(PRESENCE_API, json={"userIds": batch}, timeout=15, headers=headers_no_cookie)
-            if r.status_code==200:
-                for p in r.json().get("userPresences",[]):
-                    results[p["userId"]]=p
-            else:
-                print(f"Presence batch failed {r.status_code}: {r.text[:200]}", file=sys.stderr)
-        except Exception as e:
-            print(f"Presence error {e}", file=sys.stderr)
-        time.sleep(0.5)
+        batch = user_ids[i:i + PRESENCE_BATCH_SIZE]
+        for attempt in range(1, 4):
+            try:
+                if sess_fp and "x-csrf-token" in headers:
+                    r = sess_fp.post(PRESENCE_API, json={"userIds": batch}, timeout=15, headers=headers)
+                else:
+                    r = requests.post(PRESENCE_API, json={"userIds": batch}, timeout=15, headers=headers)
+                if r.status_code == 403 and r.headers.get("x-csrf-token") and "Cookie" in headers:
+                    headers["x-csrf-token"] = r.headers["x-csrf-token"]
+                    continue
+                if r.status_code == 403 and "Cookie" in headers:
+                    print("Presence 403 with cookie — retrying unauthenticated (cookie may be invalid/expired)", file=sys.stderr)
+                    headers_no_cookie = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
+                    r = requests.post(PRESENCE_API, json={"userIds": batch}, timeout=15, headers=headers_no_cookie)
+                if r.status_code == 429 and attempt < 3:
+                    try:
+                        wait = float(r.headers.get("Retry-After") or 5.0)
+                    except ValueError:
+                        wait = 5.0
+                    time.sleep(min(wait, 15.0) + 0.5)
+                    continue
+                if r.status_code == 200:
+                    for p in r.json().get("userPresences", []):
+                        results[p["userId"]] = p
+                else:
+                    print(f"Presence batch failed {r.status_code}: {r.text[:200]}", file=sys.stderr)
+                break
+            except Exception as e:
+                print(f"Presence error {e}", file=sys.stderr)
+                if attempt < 3:
+                    time.sleep(1 + attempt)
+        time.sleep(0.4)
     return results
 
 def main():
@@ -596,13 +760,11 @@ def main():
         info.update({"role": "Developer", "rank": 255, "roleId": 0})
         members.append(info)
 
-    presences=fetch_presences(ids_for_presence)
-    print(f"Got {len(presences)}/{len(ids_for_presence)} presence responses")
-
-    # Fetch followings for isFollowing flag using pool (any of 6 follows -> true)
+    # Fetch followings across the pool FIRST so fetch_presences can query each account's followed users directly
     headers_for_follow=_cookie_headers()
     pool=_get_all_cookies()
     followings=set()
+    account_followings={}
     my_ids=[]
     for key, ck in pool:
         hdr={"Cookie": f".ROBLOSECURITY={ck}"}
@@ -611,6 +773,7 @@ def main():
             my_ids.append(mid)
             f=_get_followings(mid, hdr)
             print(f"pool {key} -> my_id {mid} following {len(f)}", file=sys.stderr)
+            account_followings[key]=f
             followings.update(f)
     # fallback single if pool empty
     if not pool:
@@ -624,6 +787,13 @@ def main():
     else:
         my_id=None
         print("Pool no my_id - unauthenticated", file=sys.stderr)
+
+    _set_pool_followings_hint(pool, account_followings)
+    try:
+        presences=fetch_presences(ids_for_presence)
+    finally:
+        _set_pool_followings_hint([], {})
+    print(f"Got {len(presences)}/{len(ids_for_presence)} presence responses")
 
     # Categorize same as group scanner
     target=[]
