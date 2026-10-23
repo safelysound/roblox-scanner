@@ -448,12 +448,14 @@ def load_state(path, target_sig=None, target_ids=None, shard=0, shards=1):
         LOAD_INFO.update(result="none (fresh start)", age=None)
         st = fresh_state()
         st["target"] = target_sig
+        st["shards"] = shards
         return st, False
 
     age = time.time() - st.get("updated", 0)
-    if age > STATE_MAX_STALE:
-        log("state is stale, reseeding without announcements")
-        LOAD_INFO.update(result="STALE (reseeded silently)", age=age)
+    if age > STATE_MAX_STALE or st.get("shards") != shards:
+        reason = "STALE (reseeded silently)" if age > STATE_MAX_STALE else f"SHARDS {st.get('shards')}->{shards} (reseeded silently)"
+        log(f"state {reason}")
+        LOAD_INFO.update(result=reason, age=age)
         fresh = fresh_state()
         fresh["members"] = st.get("members", [])
         fresh["members_ts"] = st.get("members_ts", 0)
@@ -461,6 +463,7 @@ def load_state(path, target_sig=None, target_ids=None, shard=0, shards=1):
         fresh["followers_accts"] = st.get("followers_accts", [])
         fresh["followers_ts"] = st.get("followers_ts", 0)
         fresh["target"] = target_sig
+        fresh["shards"] = shards
         return fresh, False
 
     LOAD_INFO.update(result="loaded", age=age)
@@ -706,6 +709,8 @@ def resolve_ids(tracker, st, shard=0, shards=1):
     ids = []
     if tracker.get("idsFile"):
         ids.extend(load_user_ids(tracker["idsFile"]))
+    if tracker.get("extraIdsFile") and Path(tracker["extraIdsFile"]).exists():
+        ids.extend(load_user_ids(tracker["extraIdsFile"]))
     if tracker.get("groupId"):
         gid = int(tracker["groupId"])
         prev = list(st.get("members") or [])
