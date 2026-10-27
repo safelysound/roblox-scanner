@@ -1,6 +1,6 @@
 # Developer IDs — synced from configured developer communities + preserved manual entries
 # One ID per line, "#" for comments. Changes take effect on next 5-min scheduled run.
-# Total unique IDs: 148 (synced groups 4111519:29, 15556721:59, 33163515:44) — updated 2026-10-24
+# Total unique IDs: 149 (synced groups 4111519:29, 15556721:60, 33163515:44) — updated 2026-10-27
 302562
 630810
 792733
@@ -61,6 +61,7 @@
 74972628
 78705381
 85233914
+89811502
 91512961
 91812802
 92313341
