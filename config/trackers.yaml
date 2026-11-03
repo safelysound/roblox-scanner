@@ -109,4 +109,6 @@ settings:
   # changes -- flip back to false when the next event starts. Only affects the automatic cron dispatch
   # (tracker: all/unset); a manual dispatch for one specific tracker always runs, so testing and prep
   # work between events is unaffected.
-  paused: false
+  # PAUSED 2026-11-03: The Hollow (Oct 22 - Nov 2, 2026) is over. Nothing runs on the 5-min cron.
+  # Flip back to false when the next event is configured (set targetPlaceId/targetUniverseId first).
+  paused: true
