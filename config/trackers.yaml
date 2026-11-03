@@ -49,9 +49,6 @@ trackers:
   - id: developers
     name: Developer Tracker
     idsFile: config/developer_ids.txt  # permanent hub developers (Roblox Presents, Twin Atlas, etc.)
-    # TEMPORARY (The Hollow event, Oct 22 - Nov 2, 2026): participating-game developers ONLY.
-    # Delete config/hollow_participating_dev_ids.txt (or comment out extraIdsFile below) after the event ends.
-    extraIdsFile: config/hollow_participating_dev_ids.txt
     groupSources:
       - groupId: 4111519   # Roblox Presents (The Hollow creator) — Developer, Admin, Owner
         minRank: 200
@@ -59,7 +56,7 @@ trackers:
         minRank: 252
       - groupId: 15556721  # Twin Atlas — Developer, Manager, Administrator, Director, Executive, Twin Atlas
         minRank: 250
-    shards: 2  # parallel scan jobs for standing embed across permanent + temporary event developers
+    shards: 2  # parallel scan jobs for standing embed across permanent hub developers
     color: "#000000"
     emoji: "<:developer:1551388816324169838>"
     webhookSecret: DISCORD_WEBHOOK_DEVELOPERS
@@ -82,8 +79,8 @@ notifiers:
     roleId: "1552512715443146805"
     emoji: "<:roblox:1551329066337050754>"
     webhookSecret: DISCORD_WEBHOOK_DEVELOPER_JOINS
-    shards: 4
-    interval: 6
+    shards: 2
+    interval: 8
 
   admin:
     tracker: admin
