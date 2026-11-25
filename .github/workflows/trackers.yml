@@ -64,6 +64,10 @@ jobs:
           else
             TRACKERS="$ALL"
           fi
+          # Honor per-tracker `enabled: false` (e.g. the developer tracker while an event has no
+          # Developer Launcher). Disabled trackers drop out of scan, merge, follow AND notify,
+          # because the notifier matrix below is intersected with this list by id.
+          TRACKERS=$(jq -c '[.[] | select(.enabled != false)]' <<< "$TRACKERS")
           if [ "$(jq length <<< "$TRACKERS")" -eq 0 ]; then
             echo "::error::No tracker matches '$SELECTED' in config/trackers.yaml"
             exit 1

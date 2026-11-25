@@ -48,9 +48,15 @@ trackers:
 
   - id: developers
     name: Developer Tracker
+    # DISABLED for The Great Build (Nov 2026): that event ships no Developer Launcher -- only
+    # Admins and Video Stars. Tracking the developer roster as before would only produce false
+    # "A Developer has joined" alerts, since a pinned placeId makes every member who happens to
+    # be in the game look like a developer. Flip enabled back to true for the next event that
+    # does have a developer launcher; groupSources auto-grows the roster from the hub groups.
+    enabled: false
     idsFile: config/developer_ids.txt  # permanent hub developers (Roblox Presents, Twin Atlas, etc.)
     groupSources:
-      - groupId: 4111519   # Roblox Presents (The Hollow creator) — Developer, Admin, Owner
+      - groupId: 4111519   # Roblox Presents — Developer, Admin, Owner
         minRank: 200
       - groupId: 33163515  # Twin Atlas Events — Developer, Manager, Administrator, Director
         minRank: 252
@@ -103,12 +109,15 @@ notifiers:
     interval: 6
 
 settings:
-  targetPlaceId: 116463962153167
-  targetUniverseId: 10770728771
+  # The Great Build (Nov 2026) — https://www.roblox.com/games/98487757108234/The-Great-Build
+  # Admins + Video Stars only: this event ships no Developer Launcher, so the developer tracker
+  # is disabled above rather than pointed at a game it cannot legitimately report on.
+  targetPlaceId: 98487757108234
+  targetUniverseId: 10778869268
   # Set to true between events to stop all automatic activity (scan, notify, follow) with zero code
   # changes -- flip back to false when the next event starts. Only affects the automatic cron dispatch
   # (tracker: all/unset); a manual dispatch for one specific tracker always runs, so testing and prep
   # work between events is unaffected.
-  # PAUSED 2026-11-03: The Hollow (Oct 22 - Nov 2, 2026) is over. Nothing runs on the 5-min cron.
-  # Flip back to false when the next event is configured (set targetPlaceId/targetUniverseId first).
-  paused: true
+  # UNPAUSED 2026-11-25: The Great Build (place 98487757108234) is live. Admin + Video Star
+  # trackers run on the 5-min cron; developer tracker is disabled via enabled: false above.
+  paused: false

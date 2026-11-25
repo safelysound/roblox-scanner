@@ -7,8 +7,12 @@ name: Sync Developer IDs
 # update standing embeds, and auto-follow hidden in-game developers.
 
 on:
-  schedule:
-    - cron: '23 */2 * * *'
+  # DISABLED for The Great Build (Nov 2026): that event has no Developer Launcher, so the
+  # developer roster this job maintains is not being tracked. It also burns the same cookie
+  # pool the Admin / Video Star trackers depend on, so keeping it idle avoids needless 429
+  # pressure during the event. Restore the cron below when the developer tracker is re-enabled.
+  # schedule:
+  #   - cron: '23 */2 * * *'
   workflow_dispatch:
 
 permissions:
