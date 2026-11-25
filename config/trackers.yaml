@@ -32,7 +32,7 @@ trackers:
     webhookSecret: DISCORD_WEBHOOK
     resultsFile: roblox_scan_results.json
     messageIdFile: .github/discord_message_id.txt
-    scanEvery: 15  # was every tick; this is by far the biggest single presence-load contributor (~2800 members)
+    scanEvery: 5  # was every tick; this is by far the biggest single presence-load contributor (~2800 members)
 
   - id: video-stars
     name: Video Star Tracker
@@ -44,7 +44,7 @@ trackers:
     webhookSecret: DISCORD_WEBHOOK_VIDEO_STARS
     resultsFile: roblox_scan_results_video.json
     messageIdFile: .github/discord_message_id_video_stars.txt
-    scanEvery: 15
+    scanEvery: 5
 
   - id: developers
     name: Developer Tracker
