@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import join_notifier as jn  # noqa: E402
-from developer_scanner import _get_all_cookies  # noqa: E402
+from developer_scanner import _get_all_cookies, fetch_presences  # noqa: E402
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 from tracker_scanner import fetch_group_members, resolve_universe_id  # noqa: E402
@@ -173,17 +173,12 @@ def main():
 
     # ---------------------------------------------------------------- presence sweep
     pool = _get_all_cookies()
-    accounts = [jn.Account(key, cookie) for key, cookie in pool]
-    cache = {"viewer": dict(followers), "unseeable_until": {}, "unseeable_job": set()}
-    stats = Counter()
-    best, ok, complete = jn.poll(
-        accounts,
-        roster_ids,
-        poll_no=1,
-        stats=stats,
-        cache=cache,
-        follower_capable_keys=set(followers_accts),
-    )
+    # fetch_presences paces one 50-user batch at a time (0.35s), rotates through the cookie pool,
+    # and does follower/hidden passes. jn.poll is built for ~475-ID shards and rate-limits hard
+    # when handed the whole 2,852-member roster in one runner.
+    best = fetch_presences(roster_ids)
+    ok = bool(best)
+    complete = len(best) >= len(roster_ids) * 0.95
 
     live_target = set()
     hidden = set()
@@ -208,7 +203,7 @@ def main():
 
     coverage = len(best) / max(1, len(roster_ids))
     result["presence"] = {
-        "accounts": len(accounts),
+        "accounts": len(pool),
         "queried": len(roster_ids),
         "responses": len(best),
         "coverage": round(coverage, 4),
@@ -222,7 +217,6 @@ def main():
         "offline": len(offline),
         "website": len(website),
         "studio": len(studio),
-        "hidden_avg": round(stats["hidden"] / max(1, 1), 1),
     }
     check("presence_coverage", coverage >= 0.95, f"answered for {len(best)}/{len(roster_ids)} ({coverage:.1%})")
     check("live_target_in_state", live_target <= hunt,
