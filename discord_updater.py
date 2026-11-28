@@ -141,8 +141,8 @@ def _format_player_lines(data: dict, emoji: str = ROBLOX_EMOJI, any_game=None) -
             filtered.append(u)
             continue
         if ptype_int == 2 and pid is None and u.get("universeId") is None:
-            # In game with a hidden location: keep followed and unfollowed players. The place is shown
-            # only when a pool account actually receives it; otherwise the line reads Unknown.
+            if is_following:
+                continue
             filtered.append(u)
 
     def sort_key(u):
