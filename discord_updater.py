@@ -194,19 +194,20 @@ def _format_player_lines(data: dict, emoji: str = ROBLOX_EMOJI, any_game=None) -
             ptype_int = None
 
         if _is_target_visible(u):
+            label = md_escape(game_name or "Game")
             if ptype_int == 0:
-                playing = f"{game_url} (Appearing Offline - Must Follow to Join)"
+                playing = f"[{label}]({game_url}) (Appearing Offline - Must Follow to Join)"
             elif is_following:
-                playing = f"{game_url} (Must Follow to Join)"
+                playing = f"[{label}]({game_url}) (Must Follow to Join)"
             else:
-                playing = f"{game_url}"
+                playing = f"[{label}]({game_url})"
             if any_game and job_id and pid_check:
                 join_link = f"{JOIN_REDIRECT_BASE}?placeId={pid_check}&gameInstanceId={job_id}"
-                playing += f"\u30fb{join_link}"
+                playing += f" \u00b7 [Join \u2197]({join_link})"
         else:
             playing = "**Unknown** (Must Follow/Game Status Hidden)"
 
-        lines.append(f"- {emoji} {display} (@{username}) {profile}\n  - Playing: {playing}")
+        lines.append(f"- {emoji} [{display} (@{username})]({profile})\n  - Playing: {playing}")
 
     return lines
 
