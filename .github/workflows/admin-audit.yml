@@ -3,6 +3,7 @@ name: Admin audit (temporary)
 # Read-only diagnostic: compares the live Admin group roster with all notifier state
 # branches and a fresh presence sweep. Does not post to Discord or persist state.
 on:
+  push:
   workflow_dispatch:
 
 permissions:
