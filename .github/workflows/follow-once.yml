@@ -1,0 +1,49 @@
+name: One-off follow test (temporary)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
+    steps:
+      - name: Follow target from ROBLOSECURITY and check presence
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request, urllib.error, time
+          TARGET = 11645029825
+          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          ck = os.environ.get("ROBLOSECURITY", "").strip().strip('"').strip("'")
+          if ck.startswith(".ROBLOSECURITY="): ck = ck.split("=", 1)[1]
+          def req(method, url, body=None, csrf=None):
+              h = {"User-Agent": UA, "Accept": "application/json", "Referer": "https://www.roblox.com/", "Cookie": f".ROBLOSECURITY={ck}"}
+              if csrf: h["x-csrf-token"] = csrf
+              data = None
+              if body is not None:
+                  data = json.dumps(body).encode(); h["Content-Type"] = "application/json"
+              r = urllib.request.Request(url, data=data, headers=h, method=method)
+              try:
+                  with urllib.request.urlopen(r, timeout=20) as resp:
+                      return resp.status, dict(resp.headers), resp.read().decode("utf-8", "replace")
+              except urllib.error.HTTPError as e:
+                  return e.code, dict(e.headers), e.read().decode("utf-8", "replace")
+          s, h, b = req("GET", "https://users.roblox.com/v1/users/authenticated")
+          print("auth", s, "id", json.loads(b).get("id") if s == 200 else "-")
+          url = f"https://friends.roblox.com/v1/users/{TARGET}/follow"
+          s, h, b = req("POST", url, {})
+          if s == 403 and h.get("x-csrf-token"):
+              s, h, b = req("POST", url, {}, csrf=h["x-csrf-token"])
+          print("follow POST", s, b[:160])
+          time.sleep(20)
+          s, h, b = req("POST", "https://presence.roblox.com/v1/presence/users", {"userIds": [TARGET]})
+          if s == 403 and h.get("x-csrf-token"):
+              s, h, b = req("POST", "https://presence.roblox.com/v1/presence/users", {"userIds": [TARGET]}, csrf=h["x-csrf-token"])
+          if s == 200:
+              p = json.loads(b)["userPresences"][0]
+              print("presence", s, "type", p.get("userPresenceType"), "place", "yes" if p.get("placeId") else "no", "gameId", "yes" if p.get("gameId") else "no")
+          else:
+              print("presence", s)
+          PY
