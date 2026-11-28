@@ -94,7 +94,7 @@ def main():
     roster = fetch_group_members(GROUP_ID, strict=True)
     roster_ids = sorted({int(m["userId"]) for m in roster if m.get("userId")})
     roster_names = {int(m["userId"]): m.get("username") or m.get("name") for m in roster if m.get("userId")}
-    role_counts = Counter((m.get("role") or {}).get("name") or "?" for m in roster)
+    role_counts = Counter(m.get("role") or "?" for m in roster)
     result["group"] = {
         "id": GROUP_ID,
         "memberCount": member_count,
