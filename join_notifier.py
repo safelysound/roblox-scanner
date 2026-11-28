@@ -604,9 +604,10 @@ def build_payload(uid, name, p, cfg, joined_at, thumb=None, test=False, game_nam
     server = f"`{job}`" if job else "`server not visible`"
     game_label = game_name or DEFAULT_GAME_NAME
     desc = (f"- {cfg['emoji']} [{display} ({username})]({profile}) has joined **{game_label}**!\n"
-            f"<t:{int(joined_at)}:R>\u30fb{server}\u30fbdiscord.gg/apeYAU3nsN")
+            f"<t:{int(joined_at)}:R>\u30fb{server}")
     title_text = cfg["title"].format(game=game_label)
     embed = {"title": ("[TEST] " if test else "") + title_text, "description": desc}
+    embed["footer"] = {"text": "discord.gg/apeYAU3nsN"}
     if cfg.get("color") is not None:
         embed["color"] = cfg["color"]
     if thumb:
