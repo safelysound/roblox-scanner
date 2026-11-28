@@ -78,6 +78,15 @@ jobs:
                       cur = j.get("nextPageCursor") or ""
                       if not cur: break
                   follows = {t: (t in allids) for t in TARGETS}
+                  fr = set(); cur2 = ""
+                  for _ in range(20):
+                      q = f"https://friends.roblox.com/v1/users/{my_id}/friends?limit=100" + (f"&cursor={cur2}" if cur2 else "")
+                      s5, _, b5 = req("GET", q, ck)
+                      if s5 != 200: break
+                      j5 = json.loads(b5); fr.update(e["id"] for e in j5.get("data", []))
+                      cur2 = j5.get("nextPageCursor") or ""
+                      if not cur2: break
+                  print(f"  friends_of_account_contains: {{t: (t in fr) for t in TARGETS}} count={len(fr)}".replace("{{t: (t in fr) for t in TARGETS}}", str({t: (t in fr) for t in TARGETS})))
               st, pres = presence(ck)
               print(f"ACCOUNT {key}: my_id={my_id} follows={follows} presence={st}")
               if pres:
