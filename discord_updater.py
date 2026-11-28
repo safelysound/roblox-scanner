@@ -302,7 +302,7 @@ def build_message_batches(
 ) -> list:
     """Return List[List[embed_dict]] — one inner list of embeds per Discord message needed."""
     lines = _format_player_lines(data, emoji=emoji, any_game=any_game)
-    footer = f"-# Last updated: <t:{int(time.time())}:R> \u00b7 [Join our Discord](https://discord.gg/apeYAU3nsN)"
+    footer = f"-# Last updated: <t:{int(time.time())}:R>\u30fbdiscord.gg/apeYAU3nsN"
     return _pack_lines_into_messages(lines, title=title, color=color, footer=footer, msg_char_limit=msg_char_limit, max_desc=max_desc)
 
 
