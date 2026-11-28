@@ -66,7 +66,14 @@ def _request_with_backoff(session, method, url, max_retries=6, **kwargs):
             time.sleep(1+attempt)
     return None
 
-def fetch_group_members(group_id, max_members=None, delay=0.6, verbose=False):
+def fetch_group_members(group_id, max_members=None, delay=0.6, verbose=False, strict=False):
+    """Fetch group members. With `strict`, raise instead of returning a truncated roster.
+
+    A partial page failure used to return a short member list silently, which would publish a
+    standing embed missing people. The workflow only skips a merge when a shard artifact is
+    missing, so failing here keeps the previous embed intact instead of dropping members.
+    """
+    complete = True
     pool = _get_all_cookies()
     sess = requests.Session()
     sess.headers.update({"User-Agent":"Mozilla/5.0","Accept":"application/json","Referer":"https://www.roblox.com/"})
@@ -96,6 +103,7 @@ def fetch_group_members(group_id, max_members=None, delay=0.6, verbose=False):
         r = _request_with_backoff(sess, "GET", url, params=params)
         if not r or r.status_code!=200:
             print(f"Group {group_id} page {page} failed {r.status_code if r else 'no resp'}", file=sys.stderr)
+            complete = False
             break
         j=r.json()
         batch=j.get("data",[])
@@ -123,6 +131,14 @@ def fetch_group_members(group_id, max_members=None, delay=0.6, verbose=False):
         time.sleep(delay + __import__("random").uniform(-0.1,0.1))
     if verbose:
         print(f"Fetched {len(members)} members for group {group_id}", file=sys.stderr)
+    if strict and not max_members:
+        # Allow a small drift: memberCount is sampled before paging and people can leave mid-scan.
+        truncated = bool(expected_count) and len(members) < expected_count * 0.9
+        if not complete or truncated:
+            raise RuntimeError(
+                f"Group {group_id} roster incomplete: fetched {len(members)} of "
+                f"{expected_count if expected_count is not None else 'unknown'} members"
+            )
     return members
 
 def load_tracker_config(tracker_id, return_settings=False):
@@ -164,8 +180,14 @@ def resolve_tracker(args):
     group_sources = []
     place_id = args.place_id
     cfg_universe = None
+    settings = {}
     if args.extra_ids:
         for part in args.extra_ids.replace(",", " ").split():
+            if part.isdigit():
+                extra_ids.append(int(part))
+    # `--user-ids` is a hidden alias kept for compatibility; it used to be parsed and ignored.
+    if getattr(args, "user_ids", ""):
+        for part in str(args.user_ids).replace(",", " ").split():
             if part.isdigit():
                 extra_ids.append(int(part))
     if args.extra_ids_file and Path(args.extra_ids_file).exists():
@@ -206,6 +228,7 @@ def resolve_tracker(args):
             place_id = DEFAULT_PLACE_ID
         any_game = False
     args._cfg_universe = cfg_universe
+    args._cfg_game_name = settings.get("targetGameName")
     args._group_sources = group_sources
     return group_id, ids_file, extra_ids, place_id, any_game
 
@@ -218,7 +241,7 @@ def tracker_main_logic():
     if group_id is not None:
         if verbose:
             print(f"Tracker {args.tracker or group_id}: fetching group {group_id}", file=sys.stderr)
-        group_members = fetch_group_members(group_id, max_members=args.max_members, delay=0.6, verbose=verbose)
+        group_members = fetch_group_members(group_id, max_members=args.max_members, delay=0.6, verbose=verbose, strict=True)
         all_members.extend(group_members)
     file_ids=[]
     if ids_file and Path(ids_file).exists():
@@ -291,8 +314,14 @@ def tracker_main_logic():
         if verbose:
             print("any_game mode: tracking every game members are in, not one fixed target", file=sys.stderr)
     else:
-        universe=args.universe_id or resolve_universe_id(place_id) or getattr(args, "_cfg_universe", None) or DEFAULT_UNIVERSE_ID
-        game_name=resolve_game_name(universe)
+        # Only fall back to the built-in universe for the built-in place. For a custom place,
+        # an unresolved universe must stay unknown rather than silently comparing against the
+        # default game's universe (which could mark a different game's players as target).
+        universe = (args.universe_id or resolve_universe_id(place_id)
+                    or getattr(args, "_cfg_universe", None)
+                    or (DEFAULT_UNIVERSE_ID if int(place_id) == DEFAULT_PLACE_ID else None))
+        game_name=resolve_game_name(universe) if universe else None
+        game_name=game_name or getattr(args, "_cfg_game_name", None)
         if game_name and verbose:
             print(f'Target game: "{game_name}" Universe {universe}', file=sys.stderr)
     ids_for_presence=[m["userId"] for m in members_for_presence]
@@ -387,7 +416,7 @@ def tracker_main_logic():
                 print(f"profile scrape: {uid} shows target game via profile", file=sys.stderr)
                 place_id_p=place_id
                 root_place=place_id
-                univ=universe or DEFAULT_UNIVERSE_ID
+                univ=universe
                 last_loc=game_name or (DEFAULT_GAME_NAME if int(place_id)==DEFAULT_PLACE_ID else "")
                 is_following=True
                 is_target=True

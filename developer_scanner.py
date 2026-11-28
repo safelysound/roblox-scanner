@@ -207,13 +207,16 @@ def _get_followings(my_id, headers):
             "Cookie": ck,
         })
         cursor=""
+        url=f"https://friends.roblox.com/v1/users/{my_id}/followings"
         while True:
-            url=f"https://friends.roblox.com/v1/users/{my_id}/followings?limit=100&sortOrder=Asc"
+            # Pass the cursor as a query param so requests URL-encodes it. Interpolating it raw
+            # corrupts cursors containing '+', '=' etc. and silently truncates pagination past 100.
+            params={"limit": 100, "sortOrder": "Asc"}
             if cursor:
-                url+=f"&cursor={cursor}"
+                params["cursor"]=cursor
             r=None
             for attempt in range(1, 7):
-                r=sess.get(url, timeout=12)
+                r=sess.get(url, params=params, timeout=12)
                 if r.status_code==200:
                     break
                 if r.status_code==429:
@@ -229,7 +232,7 @@ def _get_followings(my_id, headers):
                     continue
                 print(f"followings fetch status {r.status_code} body {r.text[:200]!r}", file=__import__("sys").stderr)
                 if r.status_code in (401,403) and attempt == 1:
-                    r2=_req.get(url, timeout=12, headers={"User-Agent":"Mozilla/5.0","Cookie": ck, "Referer":"https://www.roblox.com/"})
+                    r2=_req.get(url, params=params, timeout=12, headers={"User-Agent":"Mozilla/5.0","Cookie": ck, "Referer":"https://www.roblox.com/"})
                     print(f"followings retry status {r2.status_code}", file=__import__("sys").stderr)
                     r=r2
                 break
@@ -645,7 +648,9 @@ def main():
     else:
         ids_for_presence=ids
 
-    universe=args.universe_id or resolve_universe_id(args.place_id) or DEFAULT_UNIVERSE_ID
+    # Only fall back to the built-in universe for the built-in place (see tracker_scanner.py).
+    universe = (args.universe_id or resolve_universe_id(args.place_id)
+                or (DEFAULT_UNIVERSE_ID if int(args.place_id) == DEFAULT_PLACE_ID else None))
     game_name=resolve_game_name(universe) if universe else None
     if game_name:
         print(f'Target game: "{game_name}" Universe {universe}')
@@ -736,8 +741,8 @@ def main():
                 print(f"profile scrape: {uid} shows target game via profile", file=sys.stderr)
                 place_id=args.place_id
                 root_place=args.place_id
-                univ=universe or DEFAULT_UNIVERSE_ID
-                last_loc=game_name or DEFAULT_GAME_NAME
+                univ=universe
+                last_loc=game_name or ""
                 is_target=True
                 is_following=True
         enriched={**m, "presenceType": ptype, "presenceTypeName": {0:"Offline",1:"Online",2:"InGame",3:"InStudio"}.get(ptype,str(ptype)), "lastLocation": last_loc, "placeId": place_id, "rootPlaceId": root_place, "universeId": univ, "gameId": pres.get("gameId"), "lastOnline": pres.get("lastOnline"), "isFollowing": is_following, "presence_raw": pres}
