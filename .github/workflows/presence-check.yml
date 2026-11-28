@@ -1,0 +1,85 @@
+name: Presence check (temporary diagnostic)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
+      ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
+      ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
+      ROBLOSECURITY_2: ${{ secrets.ROBLOSECURITY_2 }}
+      ROBLOSECURITY_3: ${{ secrets.ROBLOSECURITY_3 }}
+      ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
+      ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
+      ROBLOSECURITY_6: ${{ secrets.ROBLOSECURITY_6 }}
+      ROBLOSECURITY_7: ${{ secrets.ROBLOSECURITY_7 }}
+      ROBLOSECURITY_8: ${{ secrets.ROBLOSECURITY_8 }}
+      ROBLOSECURITY_9: ${{ secrets.ROBLOSECURITY_9 }}
+      ROBLOSECURITY_10: ${{ secrets.ROBLOSECURITY_10 }}
+      ROBLOSECURITY_11: ${{ secrets.ROBLOSECURITY_11 }}
+      ROBLOSECURITY_12: ${{ secrets.ROBLOSECURITY_12 }}
+      ROBLOSECURITY_13: ${{ secrets.ROBLOSECURITY_13 }}
+      ROBLOSECURITY_14: ${{ secrets.ROBLOSECURITY_14 }}
+      ROBLOSECURITY_15: ${{ secrets.ROBLOSECURITY_15 }}
+      ROBLOSECURITY_16: ${{ secrets.ROBLOSECURITY_16 }}
+      ROBLOSECURITY_17: ${{ secrets.ROBLOSECURITY_17 }}
+      ROBLOSECURITY_18: ${{ secrets.ROBLOSECURITY_18 }}
+      ROBLOSECURITY_19: ${{ secrets.ROBLOSECURITY_19 }}
+      ROBLOSECURITY_20: ${{ secrets.ROBLOSECURITY_20 }}
+    steps:
+      - name: Query presence per account
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request, urllib.error
+          TARGETS = [11645029825]   # cometcritter
+          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          def req(method, url, cookie=None, body=None, csrf=None):
+              h = {"User-Agent": UA, "Accept": "application/json", "Referer": "https://www.roblox.com/"}
+              if cookie: h["Cookie"] = f".ROBLOSECURITY={cookie}"
+              if csrf: h["x-csrf-token"] = csrf
+              data = None
+              if body is not None:
+                  data = json.dumps(body).encode(); h["Content-Type"] = "application/json"
+              r = urllib.request.Request(url, data=data, headers=h, method=method)
+              try:
+                  with urllib.request.urlopen(r, timeout=20) as resp:
+                      return resp.status, dict(resp.headers), resp.read().decode("utf-8", "replace")
+              except urllib.error.HTTPError as e:
+                  return e.code, dict(e.headers), e.read().decode("utf-8", "replace")
+          def presence(cookie):
+              url = "https://presence.roblox.com/v1/presence/users"
+              st, hd, body = req("POST", url, cookie, {"userIds": TARGETS})
+              if st == 403 and hd.get("x-csrf-token"):
+                  st, hd, body = req("POST", url, cookie, {"userIds": TARGETS}, csrf=hd["x-csrf-token"])
+              if st != 200: return f"http {st}", None
+              return "ok", {p["userId"]: p for p in json.loads(body)["userPresences"]}
+          def fmt(p):
+              if p is None: return "-"
+              return f"type={p.get('userPresenceType')} place={'yes' if p.get('placeId') else 'no'} gameId={'yes' if p.get('gameId') else 'no'}"
+          st, pres = presence(None)
+          print(f"LOGGED OUT: {st} target {fmt(pres.get(11645029825)) if pres else '-'}")
+          seen = set()
+          for key in [k for k in os.environ if k.startswith("ROBLOSECURITY") or k == "ROBLOX_COOKIE"]:
+              ck = os.environ.get(key, "").strip().strip('"').strip("'")
+              if ck.startswith(".ROBLOSECURITY="): ck = ck.split("=", 1)[1]
+              if not ck or ck in seen: continue
+              seen.add(ck)
+              s2, _, b2 = req("GET", "https://users.roblox.com/v1/users/authenticated", ck)
+              my_id = json.loads(b2).get("id") if s2 == 200 else None
+              cur = ""; allids = set()
+              if my_id:
+                  for _ in range(40):
+                      q = f"https://friends.roblox.com/v1/users/{my_id}/followings?limit=100&sortOrder=Asc" + (f"&cursor={cur}" if cur else "")
+                      s4, _, b4 = req("GET", q, ck)
+                      if s4 != 200: break
+                      j = json.loads(b4); allids.update(e["id"] for e in j.get("data", []))
+                      cur = j.get("nextPageCursor") or ""
+                      if not cur: break
+              follows = 11645029825 in allids
+              st, pres = presence(ck)
+              print(f"ACCOUNT {key} id={my_id} follows_target={follows} presence={st} target {fmt(pres.get(11645029825)) if pres else '-'}")
+          PY
