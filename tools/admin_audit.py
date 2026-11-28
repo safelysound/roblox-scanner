@@ -284,6 +284,42 @@ def main():
     check("tracker_group", int(tracker.get("groupId") or 0) == GROUP_ID,
           f"tracker.groupId={tracker.get('groupId')!r}")
 
+    # ---------------------------------------------------------------- real tracker scan output
+    tracker_scan_path = ROOT / "admin-tracker-scan.json"
+    if tracker_scan_path.exists():
+        try:
+            scan = json.loads(tracker_scan_path.read_text(encoding="utf-8"))
+            target_players = scan.get("target_game_players") or []
+            tracker_target = {int(p["userId"]) for p in target_players if p.get("userId")}
+            meta = scan.get("meta") or {}
+            result["tracker_scan"] = {
+                "summary": scan.get("summary"),
+                "meta": {k: meta.get(k) for k in (
+                    "groupId", "targetPlaceId", "targetUniverseId", "targetGameName",
+                    "total_members", "full_group_size", "timestamp", "shard_info",
+                )},
+                "target_count": len(tracker_target),
+                "target_ids": sample(tracker_target),
+                "target_names": {str(u): roster_names.get(u) for u in sorted(tracker_target)[:15]},
+                "target_not_in_hunt": len(tracker_target - hunt),
+                "target_not_in_hunt_ids": sample(tracker_target - hunt),
+                "target_not_in_hunt_names": {str(u): roster_names.get(u) for u in sorted(tracker_target - hunt)[:15]},
+                "audit_target_not_in_tracker": sample((live_target | profile_target) - tracker_target),
+                "tracker_not_in_audit": sample(tracker_target - (live_target | profile_target)),
+            }
+            check("tracker_scan_roster", int(meta.get("total_members") or 0) == len(roster_ids),
+                  f"tracker meta total_members={meta.get('total_members')} roster={len(roster_ids)}")
+            check("tracker_scan_target", bool(meta.get("targetPlaceId") == place_id
+                                              and meta.get("targetUniverseId") == universe_id),
+                  f"tracker target {meta.get('targetPlaceId')}:{meta.get('targetUniverseId')} "
+                  f"expected {place_id}:{universe_id}")
+            check("tracker_scan_target_in_state", tracker_target <= hunt,
+                  f"{len(tracker_target - hunt)} tracker target players missing from notifier hunt")
+        except Exception as exc:  # noqa: BLE001
+            check("tracker_scan_parse", False, f"{type(exc).__name__}: {exc}")
+    else:
+        check("tracker_scan_present", False, "admin-tracker-scan.json was not produced")
+
     result["summary"] = {
         "roster": len(roster_ids),
         "state_members": len(state_members),
@@ -291,6 +327,7 @@ def main():
         "currently_in_target": len(live_target),
         "unfollowed_hunt": len(hunt - set(followers)),
         "issues": len(result["issues"]),
+        "tracker_target": (result.get("tracker_scan") or {}).get("target_count", 0),
     }
 
     (ROOT / "admin-audit.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
