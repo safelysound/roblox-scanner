@@ -383,26 +383,6 @@ def tracker_main_logic():
                 if uid in account_followings.get(k_ck, ()):
                     follower_ck = f".ROBLOSECURITY={raw_ck}"
                     break
-            # DIAG (temporary): log what a follower's profile page contains for followed hidden players.
-            try:
-                import re as _dre
-                _dh = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                       "Accept-Language": "en-US,en;q=0.9"}
-                if follower_ck:
-                    _dh["Cookie"] = follower_ck
-                _dr = requests.get(f"https://www.roblox.com/users/{uid}/profile", timeout=8, headers=_dh)
-                _txt = _dr.text or ""
-                _clean = _dre.sub(r"<meta\b[^>]*>", "", _txt, flags=_dre.IGNORECASE)
-                _clean = _dre.sub(r'data-[a-z0-9_-]+\s*=\s*"[^"]*"', "", _clean, flags=_dre.IGNORECASE)
-                print(f"DIAG profile {uid}: status {_dr.status_code} bytes {len(_txt)} follower_cookie={bool(follower_ck)} "
-                      f"place_hits={_clean.count(str(place_id))} universe_hits={_clean.count(str(universe))}", file=sys.stderr)
-                for _kw in ("userPresenceType", "placeId", "gameId", "lastLocation", "presence"):
-                    _i = _clean.find(_kw)
-                    if _i >= 0:
-                        print(f"DIAG profile {uid} near '{_kw}': " + _clean[max(0,_i-60):_i+120].replace("\n"," ")[:180], file=sys.stderr)
-            except Exception as _e:
-                print(f"DIAG profile {uid} failed: {type(_e).__name__}", file=sys.stderr)
             if _profile_shows_hunt(uid, headers_for_follow, target_place_id=place_id, target_universe_id=universe, prefer_cookie=follower_ck):
                 print(f"profile scrape: {uid} shows target game via profile", file=sys.stderr)
                 place_id_p=place_id
