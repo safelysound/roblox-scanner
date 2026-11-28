@@ -1,0 +1,80 @@
+name: Presence audit (temporary)
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ROBLOX_COOKIE: ${{ secrets.ROBLOX_COOKIE }}
+      ROBLOSECURITY: ${{ secrets.ROBLOSECURITY }}
+      ROBLOSECURITY_1: ${{ secrets.ROBLOSECURITY_1 }}
+      ROBLOSECURITY_2: ${{ secrets.ROBLOSECURITY_2 }}
+      ROBLOSECURITY_3: ${{ secrets.ROBLOSECURITY_3 }}
+      ROBLOSECURITY_4: ${{ secrets.ROBLOSECURITY_4 }}
+      ROBLOSECURITY_5: ${{ secrets.ROBLOSECURITY_5 }}
+      ROBLOSECURITY_6: ${{ secrets.ROBLOSECURITY_6 }}
+      ROBLOSECURITY_7: ${{ secrets.ROBLOSECURITY_7 }}
+      ROBLOSECURITY_8: ${{ secrets.ROBLOSECURITY_8 }}
+      ROBLOSECURITY_9: ${{ secrets.ROBLOSECURITY_9 }}
+      ROBLOSECURITY_10: ${{ secrets.ROBLOSECURITY_10 }}
+      ROBLOSECURITY_11: ${{ secrets.ROBLOSECURITY_11 }}
+      ROBLOSECURITY_12: ${{ secrets.ROBLOSECURITY_12 }}
+      ROBLOSECURITY_13: ${{ secrets.ROBLOSECURITY_13 }}
+      ROBLOSECURITY_14: ${{ secrets.ROBLOSECURITY_14 }}
+      ROBLOSECURITY_15: ${{ secrets.ROBLOSECURITY_15 }}
+      ROBLOSECURITY_16: ${{ secrets.ROBLOSECURITY_16 }}
+      ROBLOSECURITY_17: ${{ secrets.ROBLOSECURITY_17 }}
+      ROBLOSECURITY_18: ${{ secrets.ROBLOSECURITY_18 }}
+      ROBLOSECURITY_19: ${{ secrets.ROBLOSECURITY_19 }}
+      ROBLOSECURITY_20: ${{ secrets.ROBLOSECURITY_20 }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Probe cometcritter
+        run: |
+          python - <<'PY'
+          import json, sys
+          sys.path.insert(0, '.')
+          import join_notifier as jn
+          from developer_scanner import _get_all_cookies, _get_my_id, _get_followings, _profile_shows_hunt, fetch_presences
+          UID = 11645029825
+          PLACE = 98487757108234
+          UNIV = 10778869268
+          rows = []
+          for key, ck in _get_all_cookies():
+              hdr = {"Cookie": f".ROBLOSECURITY={ck}"}
+              try:
+                  mid = _get_my_id(hdr)
+                  follows = _get_followings(mid, hdr) if mid else set()
+              except Exception as e:
+                  mid, follows = None, set()
+              try:
+                  acct = jn.Account(key, ck)
+                  res = acct.presence([UID]) or []
+                  p = next((x for x in res if int(x.get("userId", 0)) == UID), {})
+              except Exception as e:
+                  p = {"error": type(e).__name__}
+              try:
+                  profile = _profile_shows_hunt(UID, {}, target_place_id=PLACE, target_universe_id=UNIV, prefer_cookie=f".ROBLOSECURITY={ck}")
+              except Exception:
+                  profile = False
+              rows.append({
+                  "account": key, "my_id": mid, "follows_comet": UID in follows,
+                  "presence": {k: p.get(k) for k in ("userPresenceType", "placeId", "rootPlaceId", "universeId", "gameId", "lastLocation", "error")},
+                  "profile_target": profile,
+              })
+          best = fetch_presences([UID]).get(UID, {})
+          print("::notice title=cometcritter probe::" + json.dumps({
+              "rows": rows,
+              "best": {k: best.get(k) for k in ("userPresenceType", "placeId", "rootPlaceId", "universeId", "gameId", "lastLocation")},
+          }, separators=(",", ":")))
+          print(json.dumps({"rows": rows, "best": best}, indent=2))
+          PY
