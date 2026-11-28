@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import join_notifier as jn  # noqa: E402
-from developer_scanner import _get_all_cookies, fetch_presences  # noqa: E402
+from developer_scanner import _get_all_cookies, _profile_shows_hunt, fetch_presences  # noqa: E402
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 from tracker_scanner import fetch_group_members, resolve_universe_id  # noqa: E402
@@ -203,6 +203,25 @@ def main():
         elif ptype == 3:
             studio.add(int(uid))
 
+    # Fully-hidden InGame presence has no place/universe, so is_hunt() cannot classify it.
+    # The tracker falls back to a profile-page scrape for followed users; mirror that here to
+    # determine whether those hidden admins are in the target game or somewhere else.
+    cookie_by_key = dict(pool)
+    profile_target = set()
+    for uid in sorted(hidden):
+        key = followers.get(uid)
+        raw = cookie_by_key.get(key) if key else None
+        if not raw:
+            continue
+        if _profile_shows_hunt(
+            uid,
+            {},
+            target_place_id=place_id,
+            target_universe_id=universe_id,
+            prefer_cookie=f".ROBLOSECURITY={raw}",
+        ):
+            profile_target.add(uid)
+
     coverage = len(best) / max(1, len(roster_ids))
     result["presence"] = {
         "accounts": len(pool),
@@ -221,6 +240,10 @@ def main():
         "hidden_unfollowed": len(hidden - set(followers)),
         "hidden_unfollowed_ids": sample(hidden - set(followers)),
         "hidden_unfollowed_names": {str(u): roster_names.get(u) for u in sorted(hidden - set(followers))[:15]},
+        "profile_target": len(profile_target),
+        "profile_target_ids": sample(profile_target),
+        "profile_target_names": {str(u): roster_names.get(u) for u in sorted(profile_target)[:15]},
+        "profile_target_not_in_hunt": len(profile_target - hunt),
         "other_game": len(other_game),
         "offline": len(offline),
         "website": len(website),
@@ -229,6 +252,8 @@ def main():
     check("presence_coverage", coverage >= 0.95, f"answered for {len(best)}/{len(roster_ids)} ({coverage:.1%})")
     check("live_target_in_state", live_target <= hunt,
           f"{len(live_target - hunt)} live target players missing from notifier hunt")
+    check("hidden_profile_target_in_state", profile_target <= hunt,
+          f"{len(profile_target - hunt)} profile-confirmed target players missing from notifier hunt")
     result["live_vs_hunt"] = {
         "live_not_in_hunt": sample(live_target - hunt),
         "hunt_not_currently_visible": len(hunt - live_target),
