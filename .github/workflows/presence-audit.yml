@@ -77,4 +77,28 @@ jobs:
               "best": {k: best.get(k) for k in ("userPresenceType", "placeId", "rootPlaceId", "universeId", "gameId", "lastLocation")},
           }, separators=(",", ":")))
           print(json.dumps({"rows": rows, "best": best}, indent=2))
+
+          # Inspect the authenticated profile HTML for presence text vs embedded place IDs.
+          import requests
+          key, ck = _get_all_cookies()[0]
+          html = requests.get(
+              f"https://www.roblox.com/users/{UID}/profile",
+              timeout=15,
+              headers={
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                  "Cookie": f".ROBLOSECURITY={ck}",
+                  "Referer": f"https://www.roblox.com/users/{UID}/profile",
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              },
+          ).text
+          hits = {}
+          for needle in ("The Great Build", "98487757108234", "10778869268", "placeId", "universeId", "Playing", "userPresenceType"):
+              idx = html.find(needle)
+              hits[needle] = {
+                  "count": html.count(needle),
+                  "snippet": html[max(0, idx - 160):idx + 260] if idx >= 0 else "",
+              }
+          print("::notice title=cometcritter profile::" + json.dumps({
+              "account": key, "status_len": len(html), "hits": hits,
+          }, separators=(",", ":")))
           PY
