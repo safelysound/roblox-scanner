@@ -167,7 +167,9 @@ def _rank(p):
     if not p:
         return 0
     r = 1 if p.get("userPresenceType") == 2 else 0
-    if p.get("placeId") or p.get("rootPlaceId"):
+    # Count universeId too: a record that reveals the universe but not the place is still more
+    # informative than a fully hidden one, and must outrank it when merging accounts' answers.
+    if p.get("placeId") or p.get("rootPlaceId") or p.get("universeId"):
         r += 2
     if p.get("gameId"):
         r += 4
@@ -431,7 +433,7 @@ def fresh_state():
     }
 
 
-def load_state(path, target_sig=None, target_ids=None, shard=0, shards=1):
+def load_state(path, target_sig=None, target_ids=None, shard=0, shards=1, grace=180):
     """Load persisted state, pruning to `target_ids` on target change and to `uid % shards == shard`."""
     try:
         st = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -452,8 +454,12 @@ def load_state(path, target_sig=None, target_ids=None, shard=0, shards=1):
         return st, False
 
     age = time.time() - st.get("updated", 0)
-    if age > STATE_MAX_STALE or st.get("shards") != shards:
-        reason = "STALE (reseeded silently)" if age > STATE_MAX_STALE else f"SHARDS {st.get('shards')}->{shards} (reseeded silently)"
+    prev_shards = st.get("shards")
+    # State written before sharding existed has no "shards" key. Treat that as a legacy
+    # single-shard state and migrate it (pruning below) instead of silently re-seeding,
+    # which would lose the in-game baseline and re-announce everyone already playing.
+    if age > STATE_MAX_STALE or (prev_shards is not None and prev_shards != shards):
+        reason = "STALE (reseeded silently)" if age > STATE_MAX_STALE else f"SHARDS {prev_shards}->{shards} (reseeded silently)"
         log(f"state {reason}")
         LOAD_INFO.update(result=reason, age=age)
         fresh = fresh_state()
@@ -467,6 +473,7 @@ def load_state(path, target_sig=None, target_ids=None, shard=0, shards=1):
         return fresh, False
 
     LOAD_INFO.update(result="loaded", age=age)
+    st["shards"] = shards  # persist the migrated/confirmed shard count
     now = time.time()
     prev_target = st.get("target")
     if target_sig and prev_target != target_sig:
@@ -477,8 +484,20 @@ def load_state(path, target_sig=None, target_ids=None, shard=0, shards=1):
         st["last_place"] = {uid: p for uid, p in st["last_place"].items() if uid in keep}
         st["target"] = target_sig
         log(f"target changed ({prev_target} -> {target_sig}): retained {len(keep)} matching session(s)")
-    else:
-        st["hunt"] = {uid: now for uid in st["hunt"]}
+    # Do NOT refresh every `hunt` timestamp to `now` here.  A user is stamped every sweep they
+    # are actually seen, so a continuously-in-game user already has a timestamp from the end of
+    # the previous run.  Rewriting them here made every previously-seen admin look "seen 15s ago"
+    # even after being offline for hours, so `detect()` could never take its `now - last > grace`
+    # branch and returning users were silently treated as never having left.
+    #
+    # Exception: if the previous run is older than `grace` (a skipped/late scheduler tick), clamp
+    # the loaded timestamps into the last grace/2 seconds once.  Without this, a single missed
+    # tick would make every continuous player look like a returning join and cause a mass ping.
+    # Normal 5-minute cadence loads state at age ~15-30s, so this does not run day to day.
+    if age > grace:
+        floor = now - grace / 2
+        st["hunt"] = {uid: max(t, floor) for uid, t in st["hunt"].items()}
+        log(f"state gap {age:.0f}s > grace {grace}s: clamped last-seen times to avoid false rejoins")
     return st, True
 
 
@@ -512,7 +531,10 @@ def detect(st, in_hunt, now, seeded, grace, wait_for_job, immediate_no_job=None,
                 st["last_place"][uid] = place
             continue
         same_place = (not place or not prev_place or place == prev_place)
-        if job and prev_job and job == prev_job and same_place:
+        # Same server ID is only proof of a continuing session while we have seen the user
+        # recently.  If they disappeared for longer than the grace window, this is a rejoin into
+        # the same (still-alive) server and should produce an alert rather than being ignored.
+        if job and prev_job and job == prev_job and same_place and last is not None and now - last <= grace:
             if place:
                 st["last_place"][uid] = place
             continue
@@ -778,6 +800,30 @@ def refresh_follower_routing(pool, st, viewer_map, capable_keys_set, shard=0):
         log(f"follower routing background refresh warning: {type(e).__name__}")
 
 
+def apply_follow_routes(st, routes, pool_keys):
+    """Merge `uid -> account key` follow routes into notifier state; return how many applied.
+
+    Routes for accounts no longer in the pool are ignored, as are malformed user IDs. Applied
+    routes extend `followers_accts` so those accounts are treated as follower-capable right away.
+    """
+    pool_keys = set(pool_keys or ())
+    valid_keys = set()
+    added = 0
+    for uid, key in (routes or {}).items():
+        if key not in pool_keys:
+            continue
+        try:
+            uid_int = int(uid)
+        except (TypeError, ValueError):
+            continue
+        st.setdefault("followers", {})[uid_int] = key
+        valid_keys.add(key)
+        added += 1
+    if valid_keys:
+        st["followers_accts"] = sorted(set(st.get("followers_accts") or []) | valid_keys)
+    return added
+
+
 def warm_metadata_cache(ids, names_dict, thumbs_dict, want_avatar=True):
     """Background batch pre-warmer so join alerts never block on user info / thumbnail HTTP calls."""
     try:
@@ -833,12 +879,15 @@ def main():
     place_id = int(settings.get("targetPlaceId", DEFAULT_PLACE_ID))
     universe_id = int(settings.get("targetUniverseId", DEFAULT_UNIVERSE_ID))
     any_game = bool(tracker.get("anyGame", False))
-    target_game_name = DEFAULT_GAME_NAME
+    # Prefer the configured display name as the offline fallback, so a failed games-API lookup
+    # can never label joins with the built-in default game (The Hollow) during another event.
+    configured_game_name = settings.get("targetGameName") or DEFAULT_GAME_NAME
+    target_game_name = configured_game_name
     if not any_game:
         try:
-            target_game_name = resolve_game_name(universe_id) or DEFAULT_GAME_NAME
+            target_game_name = resolve_game_name(universe_id) or configured_game_name
         except Exception:
-            target_game_name = DEFAULT_GAME_NAME
+            target_game_name = configured_game_name
 
     if args.test:
         if shard != 0:
@@ -862,27 +911,24 @@ def main():
         return 1
     accounts = [Account(k, c) for k, c in pool]
 
+    target_sig = "any" if any_game else f"{place_id}:{universe_id}"
+    target_ids = None if any_game else {place_id, universe_id}
+    st, seeded = load_state(state_path, target_sig=target_sig, target_ids=target_ids, shard=shard, shards=shards, grace=args.grace)
+
     # Merge follow routes written by follow_unknown.py (fetched from the follow-routes branch by the workflow).
     # New follows become routable at the next run start, without re-reading every account's follow list.
+    # This must run *after* load_state(): it mutates the loaded state, and referencing `st` before
+    # assignment raised UnboundLocalError, which the except below silently swallowed.
     routes_path = os.environ.get("FOLLOW_ROUTES_FILE", "")
     if routes_path and os.path.exists(routes_path):
         try:
             routes = json.loads(Path(routes_path).read_text())
-            pool_keys = {k for k, _ in pool}
-            added = 0
-            for uid, key in routes.items():
-                if key in pool_keys:
-                    st.setdefault("followers", {})[int(uid)] = key
-                    added += 1
+            added = apply_follow_routes(st, routes, {k for k, _ in pool})
             if added:
-                st["followers_accts"] = sorted(set(st.get("followers_accts") or []) | {k for k in routes.values() if k in pool_keys})
                 log(f"merged {added} follow routes from follow_unknown")
         except Exception as e:
             log(f"follow routes not loaded: {type(e).__name__}")
 
-    target_sig = "any" if any_game else f"{place_id}:{universe_id}"
-    target_ids = None if any_game else {place_id, universe_id}
-    st, seeded = load_state(state_path, target_sig=target_sig, target_ids=target_ids, shard=shard, shards=shards)
     ids = resolve_ids(tracker, st, shard=shard, shards=shards)
     if not ids:
         log("no users to watch")
@@ -955,6 +1001,7 @@ def main():
 
     start = time.time()
     polls = good_polls = 0
+    last_in_hunt = 0  # live count from the most recent successful sweep (not the 24h seen set)
     sweep_secs = []
     pstats = Counter()
     ring_slots = {"admin": 0, "video-stars": 2, "developers": 4}
@@ -1002,6 +1049,7 @@ def main():
                 good_polls += 1
                 with state_lock:
                     in_hunt = {u: p for u, p in best.items() if is_hunt(p, place_id, universe_id, any_game)}
+                    last_in_hunt = len(in_hunt)
                     ready = detect(
                         st,
                         in_hunt,
@@ -1037,7 +1085,8 @@ def main():
     n429 = sum(len(a.limited) for a in accounts)
     waits = sorted(w for a in accounts for w in a.limited)
     print(f"::notice title=notifier {label}::{good_polls}/{polls} polls ok, {sent} announcement(s), "
-          f"{len(st['hunt'])} {'in-game (any game)' if any_game else f'in {target_game_name}'}, {len(ids)} watched, "
+          f"{last_in_hunt} {'in-game (any game)' if any_game else f'in {target_game_name}'} now, "
+          f"{len(st['hunt'])} seen in the last 24h, {len(ids)} watched, "
           f"avg hidden {pstats['hidden'] / max(1, polls):.0f}, avg sweep {sum(sweep_secs)/len(sweep_secs):.1f}s, "
           f"state at start: {state_note} | "
           f"rate-limited accounts {limited}, disabled accounts {dead} of {len(accounts)} in pool | "

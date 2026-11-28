@@ -114,6 +114,9 @@ settings:
   # is disabled above rather than pointed at a game it cannot legitimately report on.
   targetPlaceId: 98487757108234
   targetUniverseId: 10778869268
+  # Human-readable fallback used by the scanner/notifier if Roblox's games API can't resolve
+  # the name (otherwise alerts would fall back to the built-in default game name).
+  targetGameName: The Great Build
   # Set to true between events to stop all automatic activity (scan, notify, follow) with zero code
   # changes -- flip back to false when the next event starts. Only affects the automatic cron dispatch
   # (tracker: all/unset); a manual dispatch for one specific tracker always runs, so testing and prep

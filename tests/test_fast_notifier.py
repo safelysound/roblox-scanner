@@ -9,6 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import developer_scanner as ds
 import join_notifier as jn
+import tracker_scanner as ts
 
 
 class FakeResponse:
@@ -24,19 +25,22 @@ class FakeResponse:
 
 class TestFastNotifier(unittest.TestCase):
     def test_profile_scrape_ignores_global_data_purple_banner(self):
-        # Live verification against real Roblox profile page containing data-purple=".../116463962153167/The-Hollow"
-        self.assertFalse(ds._profile_shows_hunt(1, {}, target_place_id=116463962153167, target_universe_id=10770728771))
+        # Hermetic: a sitewide promo tag (present on every profile page) must not count as presence.
+        banner_html = '<meta data-purple="https://www.roblox.com/games/116463962153167/The-Hollow" />'
+        banner = FakeResponse(200)
+        banner.text = banner_html
+        with patch("requests.get", return_value=banner):
+            self.assertFalse(ds._profile_shows_hunt(1, {}, target_place_id=116463962153167, target_universe_id=10770728771))
 
-        # Verify embedded JSON presence still matches cleanly
+        # Embedded JSON presence still matches cleanly
         html_with_json = (
             '<meta data-purple="https://www.roblox.com/games/116463962153167/The-Hollow" />'
             '<script>window.__DATA__ = {"userPresences":[{"placeId":116463962153167,"gameId":"abc"}]};</script>'
         )
-        with patch("requests.get", return_value=FakeResponse(200, html_with_json)):
-            fake = FakeResponse(200)
-            fake.text = html_with_json
-            with patch("requests.get", return_value=fake):
-                self.assertTrue(ds._profile_shows_hunt(999, {}, target_place_id=116463962153167, target_universe_id=10770728771))
+        page = FakeResponse(200)
+        page.text = html_with_json
+        with patch("requests.get", return_value=page):
+            self.assertTrue(ds._profile_shows_hunt(999, {}, target_place_id=116463962153167, target_universe_id=10770728771))
 
     def test_sharding_is_lossless_disjoint_and_migrates_legacy_state(self):
         with tempfile.TemporaryDirectory() as td:
@@ -71,6 +75,142 @@ class TestFastNotifier(unittest.TestCase):
 
             self.assertEqual(sorted(seen_ids), full_ids)
             self.assertEqual(sorted(seen_hunt), [1000 + i for i in range(20)])
+
+    def test_load_state_keeps_last_seen_and_detects_rejoins(self):
+        # Regression: load_state() used to stamp every loaded `hunt` entry with `now`, which made
+        # returning admins look continuously present and suppressed their join alert forever.
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "state.json"
+            now = time.time()
+            old = now - 600
+            state_path.write_text(json.dumps({
+                "hunt": {"501": old, "502": old},
+                "pending": {},
+                "last_job": {"501": "job-501"},
+                "last_place": {"501": 10770728771, "502": 10770728771},
+                "target": "116463962153167:10770728771",
+                "updated": now - 60,
+                "shards": 1,
+                "members": [501, 502],
+                "members_ts": old,
+            }), encoding="utf-8")
+
+            st, seeded = jn.load_state(
+                str(state_path),
+                target_sig="116463962153167:10770728771",
+                target_ids={116463962153167, 10770728771},
+                shard=0,
+                shards=1,
+            )
+            self.assertTrue(seeded)
+            self.assertAlmostEqual(st["hunt"][501], old, delta=0.01)
+            self.assertAlmostEqual(st["hunt"][502], old, delta=0.01)
+
+            ready = jn.detect(
+                st,
+                {
+                    501: {"userId": 501, "userPresenceType": 2, "universeId": 10770728771,
+                          "placeId": 116463962153167, "gameId": "job-501"},
+                    502: {"userId": 502, "userPresenceType": 2, "universeId": 10770728771,
+                          "placeId": 116463962153167, "gameId": None},
+                },
+                now,
+                seeded=True,
+                grace=135,
+                wait_for_job=10,
+                immediate_no_job={502},
+                prune=True,
+            )
+            self.assertEqual(set(ready), {501, 502})
+
+    def test_load_state_clamps_only_after_a_missed_tick(self):
+        # A normal run loads state seconds old, but a skipped tick must not turn every continuous
+        # player into a "returning" join and ping the whole roster.
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "state.json"
+            now = time.time()
+            state_path.write_text(json.dumps({
+                "hunt": {"601": now - 600},
+                "pending": {},
+                "last_job": {},
+                "last_place": {"601": 10770728771},
+                "target": "116463962153167:10770728771",
+                "updated": now - 600,
+                "shards": 1,
+            }), encoding="utf-8")
+
+            st, seeded = jn.load_state(
+                str(state_path),
+                target_sig="116463962153167:10770728771",
+                shard=0,
+                shards=1,
+                grace=180,
+            )
+            self.assertTrue(seeded)
+            self.assertGreater(st["hunt"][601], now - 100)
+            ready = jn.detect(
+                st,
+                {601: {"userId": 601, "userPresenceType": 2, "universeId": 10770728771,
+                       "placeId": 116463962153167, "gameId": None}},
+                time.time(),
+                seeded=True,
+                grace=180,
+                wait_for_job=10,
+                immediate_no_job={601},
+                prune=False,
+            )
+            self.assertEqual(ready, [])
+
+    def test_presence_rank_prefers_revealed_universe_over_hidden(self):
+        hidden = {"userPresenceType": 2, "placeId": None, "rootPlaceId": None, "universeId": None, "gameId": None}
+        universe_only = {"userPresenceType": 2, "placeId": None, "rootPlaceId": None, "universeId": 10770728771, "gameId": None}
+        self.assertGreater(jn._rank(universe_only), jn._rank(hidden))
+
+    def test_strict_group_fetch_rejects_partial_roster(self):
+        class Resp:
+            def __init__(self, code, data):
+                self.status_code = code
+                self._data = data
+
+            def json(self):
+                return self._data
+
+        page = [
+            {"user": {"userId": i, "username": f"u{i}"}, "role": {"name": "Member", "rank": 1, "id": 1}}
+            for i in range(100)
+        ]
+
+        def fake_request(sess, method, url, **kwargs):
+            if url.endswith("/v1/groups/1"):
+                return Resp(200, {"memberCount": 200})
+            if not (kwargs.get("params") or {}).get("cursor"):
+                return Resp(200, {"data": page, "nextPageCursor": "next-page"})
+            return None  # second page fails -> roster is truncated
+
+        with patch.object(ts, "_get_all_cookies", return_value=[]), \
+             patch.object(ts, "_request_with_backoff", side_effect=fake_request):
+            with self.assertRaises(RuntimeError):
+                ts.fetch_group_members(1, strict=True)
+            self.assertEqual(len(ts.fetch_group_members(1, strict=False)), 100)
+
+    def test_follow_routes_merge_after_state_load(self):
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "state.json"
+            st, seeded = jn.load_state(str(state_path), target_sig="116463962153167:10770728771", shard=0, shards=2)
+            self.assertFalse(seeded)
+            st["followers"] = {501: "acct_1"}
+            st["followers_accts"] = ["acct_1"]
+
+            added = jn.apply_follow_routes(
+                st,
+                {"502": "acct_1", "503": "retired_acct", "not-a-user-id": "acct_2", "504": "acct_2"},
+                {"acct_1", "acct_2"},
+            )
+            self.assertEqual(added, 2)
+            self.assertEqual(st["followers"][501], "acct_1")
+            self.assertEqual(st["followers"][504], "acct_2")
+            self.assertNotIn(503, st["followers"])
+            self.assertEqual(st["followers_accts"], ["acct_1", "acct_2"])
 
     def test_parallel_streaming_poll_routes_followers_and_streams_mid_sweep(self):
         accts = [jn.Account(f"acct_{i}", f"ck_{i}") for i in range(4)]
