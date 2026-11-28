@@ -141,8 +141,8 @@ def _format_player_lines(data: dict, emoji: str = ROBLOX_EMOJI, any_game=None) -
             filtered.append(u)
             continue
         if ptype_int == 2 and pid is None and u.get("universeId") is None:
-            if is_following:
-                continue
+            # In-game but location hidden. Followed accounts are kept too (shown as the target game,
+            # "Must Follow to Join"); unfollowed ones show as Unknown.
             filtered.append(u)
 
     def sort_key(u):
@@ -204,6 +204,9 @@ def _format_player_lines(data: dict, emoji: str = ROBLOX_EMOJI, any_game=None) -
             if any_game and job_id and pid_check:
                 join_link = f"{JOIN_REDIRECT_BASE}?placeId={pid_check}&gameInstanceId={job_id}"
                 playing += f" \u00b7 [Join \u2197]({join_link})"
+        elif ptype_int == 2 and pid_check is None and u.get("universeId") is None and is_following:
+            t_name, t_url = get_game_link(target_place, target_universe, "", target_place_id=target_place, target_game_name=target_game_name)
+            playing = f"[{md_escape(t_name or 'Game')}]({t_url}) (Must Follow to Join)"
         else:
             playing = "**Unknown** (Must Follow/Game Status Hidden)"
 
