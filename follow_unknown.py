@@ -205,6 +205,7 @@ def main():
     start=time.time()
     deadline=start+args.max_seconds
     followed=set(); skipped=[]
+    routes={}  # uid -> pool key that now follows it; handed to join_notifier via follow-routes branch
     stats=Counter()
     tries={}            # uid -> failed attempts so far
     consec_fail=0       # failed attempts in a row, across users/accounts
@@ -256,6 +257,7 @@ def main():
         if status in ("ok","already"):
             print(f"  -> {status} {code}", file=sys.stderr)
             followed.add(uid)
+            routes[str(uid)]=key
             consec_fail=0
             consec_429=0
             avail["follows"]+=1
@@ -303,6 +305,11 @@ def main():
             skipped.append(uid)
             idx+=1
 
+    elapsed=time.time()-start
+    try:
+        Path(os.environ.get("FOLLOW_ROUTES_OUT","follow_routes.json")).write_text(json.dumps(routes, indent=0))
+    except Exception as e:
+        print(f"::warning::could not write follow routes: {type(e).__name__}", file=sys.stderr)
     elapsed=time.time()-start
     not_followed=[u for u in unknowns if u not in followed]
     summary=(f"followed {len(followed)}/{total} in {elapsed:.0f}s | requests={attempts} "

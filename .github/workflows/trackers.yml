@@ -311,6 +311,8 @@ jobs:
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.scan_trackers != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
     concurrency:
       group: trackers-follow-${{ matrix.id }}
       cancel-in-progress: false
@@ -373,6 +375,32 @@ jobs:
           # starts, so follow jobs no longer queue behind each other and get cancelled.
           python follow_unknown.py --tracker "$TRACKER" --json "$RESULTS" --max-seconds 200
 
+      - name: Publish follow routes for ${{ matrix.id }}
+        if: ${{ always() }}
+        env:
+          TRACKER: ${{ matrix.id }}
+        run: |
+          # Merge this run's successful follows into branch follow-routes-<tracker>, so the notifier can route
+          # newly followed players without re-reading every account's follow list.
+          [ -f follow_routes.json ] || { echo 'no follow_routes.json, nothing to publish'; exit 0; }
+          BR="follow-routes-${TRACKER}"
+          REMOTE=$(git remote get-url origin 2>/dev/null || echo "https://github.com/${{ github.repository }}.git")
+          AUTH=$(git config --get http.https://github.com/.extraheader || true)
+          for attempt in 1 2 3 4; do
+            TMP=$(mktemp -d); cd "$TMP"
+            git init -q -b "$BR"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            if [ -n "$AUTH" ]; then git config http.https://github.com/.extraheader "$AUTH"; fi
+            if git fetch -q --depth=1 "$REMOTE" "refs/heads/${BR}" 2>/dev/null && git show FETCH_HEAD:routes.json > old.json 2>/dev/null; then :; else echo '{}' > old.json; fi
+            python3 -c "import json; o=json.load(open('old.json')); o.update(json.load(open('$GITHUB_WORKSPACE/follow_routes.json'))); json.dump(o, open('routes.json','w'), indent=0)"
+            git add routes.json
+            git commit -q -m "follow routes: $TRACKER $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            if git push -q --force "$REMOTE" "HEAD:refs/heads/${BR}"; then cd "$GITHUB_WORKSPACE"; exit 0; fi
+            cd "$GITHUB_WORKSPACE"; sleep $((attempt * 2))
+          done
+          echo '::warning::could not publish follow routes after 4 attempts'
+
   # ---------------------------------------------------------------------------
   # Real-time "someone joined The Hunt" notifiers (join_notifier.py), one job per tracker.
   # Rides the external cron: each dispatch polls presence for ~4.5 min, right up to the next tick.
@@ -397,6 +425,19 @@ jobs:
 
       - name: Ensure Python dependencies
         run: python3 -c "import requests, yaml" 2>/dev/null || pip3 install --quiet --break-system-packages -r requirements.txt
+
+      - name: Load follow routes
+        if: ${{ inputs.notifier_mode != 'test' }}
+        env:
+          TRACKER: ${{ matrix.id }}
+        run: |
+          BR="follow-routes-${TRACKER}"
+          if git fetch -q --depth=1 origin "refs/heads/${BR}" 2>/dev/null && git show FETCH_HEAD:routes.json > "$GITHUB_WORKSPACE/follow_routes_in.json" 2>/dev/null; then
+            echo "FOLLOW_ROUTES_FILE=$GITHUB_WORKSPACE/follow_routes_in.json" >> "$GITHUB_ENV"
+            echo "Loaded follow routes from ${BR}"
+          else
+            echo "No follow routes branch yet; relying on the hourly follow-list refresh"
+          fi
 
       - name: Load notifier state
         if: ${{ inputs.notifier_mode != 'test' }}

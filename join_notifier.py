@@ -862,6 +862,24 @@ def main():
         return 1
     accounts = [Account(k, c) for k, c in pool]
 
+    # Merge follow routes written by follow_unknown.py (fetched from the follow-routes branch by the workflow).
+    # New follows become routable at the next run start, without re-reading every account's follow list.
+    routes_path = os.environ.get("FOLLOW_ROUTES_FILE", "")
+    if routes_path and os.path.exists(routes_path):
+        try:
+            routes = json.loads(Path(routes_path).read_text())
+            pool_keys = {k for k, _ in pool}
+            added = 0
+            for uid, key in routes.items():
+                if key in pool_keys:
+                    st.setdefault("followers", {})[int(uid)] = key
+                    added += 1
+            if added:
+                st["followers_accts"] = sorted(set(st.get("followers_accts") or []) | {k for k in routes.values() if k in pool_keys})
+                log(f"merged {added} follow routes from follow_unknown")
+        except Exception as e:
+            log(f"follow routes not loaded: {type(e).__name__}")
+
     target_sig = "any" if any_game else f"{place_id}:{universe_id}"
     target_ids = None if any_game else {place_id, universe_id}
     st, seeded = load_state(state_path, target_sig=target_sig, target_ids=target_ids, shard=shard, shards=shards)
